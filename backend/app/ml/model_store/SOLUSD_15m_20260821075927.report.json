@@ -1,0 +1,48 @@
+{
+  "symbol": "SOLUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "trained_at": "2026-08-21T07:59:27.268474+00:00",
+  "n_samples": 4925,
+  "mean_directional_accuracy": 0.49780487804878054,
+  "mean_information_coefficient": 0.03798203133518904,
+  "prediction_std": 0.003788347580410397,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\ml\\model_store\\SOLUSD_15m_20260821075927.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.5170731707317073,
+      "information_coefficient": 0.04976107118460003,
+      "rmse": 0.009370891537093974,
+      "n_test": 820
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.46707317073170734,
+      "information_coefficient": -0.027587616383493392,
+      "rmse": 0.0077272378640229865,
+      "n_test": 820
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.4817073170731707,
+      "information_coefficient": -0.01648968776686679,
+      "rmse": 0.008788845083681994,
+      "n_test": 820
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.49634146341463414,
+      "information_coefficient": 0.014577701911089367,
+      "rmse": 0.006721294618980841,
+      "n_test": 820
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.526829268292683,
+      "information_coefficient": 0.169648687730616,
+      "rmse": 0.011381665269511948,
+      "n_test": 820
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "symbol": "SOLUSD",
+  "resolution": "1h",
+  "horizon_bars": 4,
+  "version": "20260821105525",
+  "feature_columns": [
+    "ema_9_norm",
+    "ema_21_norm",
+    "ema_50_norm",
+    "rsi_14",
+    "macd_norm",
+    "macd_signal_norm",
+    "macd_hist_norm",
+    "atr_pct",
+    "adx_14",
+    "bb_z",
+    "realized_vol_20",
+    "ret_1",
+    "ret_5",
+    "ret_15",
+    "funding_rate",
+    "funding_z",
+    "basis",
+    "rsi_14_slope_5",
+    "adx_14_slope_5",
+    "ret_1_skew_20",
+    "astro_all_pairs_aspect_score"
+  ],
+  "pred_std": 0.004968134670859591,
+  "confidence_threshold_multiple": 0.95
+}

@@ -1,0 +1,30 @@
+{
+  "symbol": "ETHUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "version": "20260821094705",
+  "feature_columns": [
+    "ema_9_norm",
+    "ema_21_norm",
+    "ema_50_norm",
+    "rsi_14",
+    "macd_norm",
+    "macd_signal_norm",
+    "macd_hist_norm",
+    "atr_pct",
+    "adx_14",
+    "bb_z",
+    "realized_vol_20",
+    "ret_1",
+    "ret_5",
+    "ret_15",
+    "funding_rate",
+    "funding_z",
+    "basis",
+    "rsi_14_slope_5",
+    "adx_14_slope_5",
+    "ret_1_skew_20"
+  ],
+  "pred_std": 0.003952904099201028,
+  "confidence_threshold_multiple": 0.95
+}

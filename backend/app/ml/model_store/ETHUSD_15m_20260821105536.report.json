@@ -1,0 +1,61 @@
+{
+  "symbol": "ETHUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "trained_at": "2026-08-21T10:55:36.616704+00:00",
+  "n_samples": 4925,
+  "mean_directional_accuracy": 0.5395121951219513,
+  "mean_information_coefficient": 0.07078337024508789,
+  "mean_decidable_fraction": 0.35804878048780486,
+  "mean_decidable_directional_accuracy": 0.5845393070895317,
+  "confidence_threshold_multiple": 0.95,
+  "prediction_std": 0.0044236386341392694,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\ml\\model_store\\ETHUSD_15m_20260821105536.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.6,
+      "information_coefficient": 0.2636840342458474,
+      "rmse": 0.010108620375376336,
+      "n_test": 820,
+      "decidable_fraction": 0.40853658536585363,
+      "decidable_directional_accuracy": 0.6567164179104478
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.5048780487804878,
+      "information_coefficient": -0.03759457717450647,
+      "rmse": 0.008195524272125653,
+      "n_test": 820,
+      "decidable_fraction": 0.37317073170731707,
+      "decidable_directional_accuracy": 0.5522875816993464
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.501219512195122,
+      "information_coefficient": -0.049903873766500975,
+      "rmse": 0.009625422871290526,
+      "n_test": 820,
+      "decidable_fraction": 0.3524390243902439,
+      "decidable_directional_accuracy": 0.5086505190311419
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.5719512195121951,
+      "information_coefficient": 0.13054133103551066,
+      "rmse": 0.006825162318472184,
+      "n_test": 820,
+      "decidable_fraction": 0.36585365853658536,
+      "decidable_directional_accuracy": 0.6
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.5195121951219512,
+      "information_coefficient": 0.04718993688508887,
+      "rmse": 0.01705199568516442,
+      "n_test": 820,
+      "decidable_fraction": 0.29024390243902437,
+      "decidable_directional_accuracy": 0.6050420168067226
+    }
+  ]
+}

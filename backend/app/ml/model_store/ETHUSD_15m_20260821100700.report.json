@@ -1,0 +1,61 @@
+{
+  "symbol": "ETHUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "trained_at": "2026-08-21T10:07:00.254568+00:00",
+  "n_samples": 4925,
+  "mean_directional_accuracy": 0.5390243902439024,
+  "mean_information_coefficient": 0.07181656512438384,
+  "mean_decidable_fraction": 0.36634146341463414,
+  "mean_decidable_directional_accuracy": 0.5884110179571651,
+  "confidence_threshold_multiple": 0.95,
+  "prediction_std": 0.004420515302400035,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\ml\\model_store\\ETHUSD_15m_20260821100700.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.5926829268292683,
+      "information_coefficient": 0.2700499365957908,
+      "rmse": 0.01006453865043214,
+      "n_test": 820,
+      "decidable_fraction": 0.39634146341463417,
+      "decidable_directional_accuracy": 0.68
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.5060975609756098,
+      "information_coefficient": -0.03522634045791409,
+      "rmse": 0.008266800462872355,
+      "n_test": 820,
+      "decidable_fraction": 0.36585365853658536,
+      "decidable_directional_accuracy": 0.5466666666666666
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.524390243902439,
+      "information_coefficient": -0.02722317654393127,
+      "rmse": 0.009621347352441918,
+      "n_test": 820,
+      "decidable_fraction": 0.36341463414634145,
+      "decidable_directional_accuracy": 0.5268456375838926
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.55,
+      "information_coefficient": 0.10931447468403384,
+      "rmse": 0.0069153884456837665,
+      "n_test": 820,
+      "decidable_fraction": 0.35853658536585364,
+      "decidable_directional_accuracy": 0.5850340136054422
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.5219512195121951,
+      "information_coefficient": 0.042167931343939945,
+      "rmse": 0.01690931454463396,
+      "n_test": 820,
+      "decidable_fraction": 0.3475609756097561,
+      "decidable_directional_accuracy": 0.6035087719298246
+    }
+  ]
+}

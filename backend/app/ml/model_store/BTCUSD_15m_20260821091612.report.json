@@ -1,0 +1,61 @@
+{
+  "symbol": "BTCUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "trained_at": "2026-08-21T09:16:12.603207+00:00",
+  "n_samples": 4925,
+  "mean_directional_accuracy": 0.5073170731707317,
+  "mean_information_coefficient": -0.02423195162890722,
+  "mean_decidable_fraction": 0.3285365853658537,
+  "mean_decidable_directional_accuracy": 0.48506253976648717,
+  "confidence_threshold_multiple": 0.95,
+  "prediction_std": 0.002823465446751274,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\ml\\model_store\\BTCUSD_15m_20260821091612.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.4682926829268293,
+      "information_coefficient": -0.06248318622709745,
+      "rmse": 0.00774530966955133,
+      "n_test": 820,
+      "decidable_fraction": 0.3280487804878049,
+      "decidable_directional_accuracy": 0.45353159851301117
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.5719512195121951,
+      "information_coefficient": 0.09669274165008919,
+      "rmse": 0.005641902721933816,
+      "n_test": 820,
+      "decidable_fraction": 0.33658536585365856,
+      "decidable_directional_accuracy": 0.5688405797101449
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.4975609756097561,
+      "information_coefficient": -0.03253344894413193,
+      "rmse": 0.007116554866374754,
+      "n_test": 820,
+      "decidable_fraction": 0.2658536585365854,
+      "decidable_directional_accuracy": 0.4908256880733945
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.5109756097560976,
+      "information_coefficient": -0.07612527100361687,
+      "rmse": 0.0047397868199698205,
+      "n_test": 820,
+      "decidable_fraction": 0.4573170731707317,
+      "decidable_directional_accuracy": 0.448
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.4878048780487805,
+      "information_coefficient": -0.04671059361977904,
+      "rmse": 0.010539427396237823,
+      "n_test": 820,
+      "decidable_fraction": 0.2548780487804878,
+      "decidable_directional_accuracy": 0.46411483253588515
+    }
+  ]
+}

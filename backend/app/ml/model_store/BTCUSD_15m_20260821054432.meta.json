@@ -1,0 +1,26 @@
+{
+  "symbol": "BTCUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "version": "20260821054432",
+  "feature_columns": [
+    "ema_9_norm",
+    "ema_21_norm",
+    "ema_50_norm",
+    "rsi_14",
+    "macd_norm",
+    "macd_signal_norm",
+    "macd_hist_norm",
+    "atr_pct",
+    "adx_14",
+    "bb_z",
+    "realized_vol_20",
+    "ret_1",
+    "ret_5",
+    "ret_15",
+    "funding_rate",
+    "funding_z",
+    "basis"
+  ],
+  "pred_std": 0.002836151202168241
+}

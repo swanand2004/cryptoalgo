@@ -1,0 +1,61 @@
+{
+  "symbol": "SOLUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "trained_at": "2026-08-21T10:07:03.479304+00:00",
+  "n_samples": 4925,
+  "mean_directional_accuracy": 0.53,
+  "mean_information_coefficient": 0.10333867021395857,
+  "mean_decidable_fraction": 0.35121951219512193,
+  "mean_decidable_directional_accuracy": 0.5505130161516579,
+  "confidence_threshold_multiple": 0.95,
+  "prediction_std": 0.004507565722710546,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\ml\\model_store\\SOLUSD_15m_20260821100703.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.5365853658536586,
+      "information_coefficient": 0.06612612666532645,
+      "rmse": 0.009942727625167026,
+      "n_test": 820,
+      "decidable_fraction": 0.30121951219512194,
+      "decidable_directional_accuracy": 0.48582995951417
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.4634146341463415,
+      "information_coefficient": -0.06111733844959007,
+      "rmse": 0.007856412524885819,
+      "n_test": 820,
+      "decidable_fraction": 0.4,
+      "decidable_directional_accuracy": 0.4329268292682927
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.5048780487804878,
+      "information_coefficient": 0.06256937573342251,
+      "rmse": 0.008484257355580645,
+      "n_test": 820,
+      "decidable_fraction": 0.2975609756097561,
+      "decidable_directional_accuracy": 0.5163934426229508
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.5682926829268292,
+      "information_coefficient": 0.18131996142338264,
+      "rmse": 0.006600870357426759,
+      "n_test": 820,
+      "decidable_fraction": 0.4121951219512195,
+      "decidable_directional_accuracy": 0.621301775147929
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.5768292682926829,
+      "information_coefficient": 0.2677952256972514,
+      "rmse": 0.011499437746626366,
+      "n_test": 820,
+      "decidable_fraction": 0.34512195121951217,
+      "decidable_directional_accuracy": 0.696113074204947
+    }
+  ]
+}

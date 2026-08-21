@@ -1,0 +1,36 @@
+# Secrets
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# DB / data
+backend/*.db
+backend/*.sqlite3
+backend/app/ml/model_store/*.pkl
+backend/app/ml/model_store/*.txt
+!backend/app/ml/model_store/.gitkeep
+
+# Ephemeris data (~17MB, downloaded automatically by skyfield on first use)
+backend/app/astro/data/*.bsp
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log

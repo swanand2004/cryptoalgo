@@ -1,0 +1,61 @@
+{
+  "symbol": "SOLUSD",
+  "resolution": "4h",
+  "horizon_bars": 1,
+  "trained_at": "2026-08-21T10:55:27.170071+00:00",
+  "n_samples": 439,
+  "mean_directional_accuracy": 0.5479452054794521,
+  "mean_information_coefficient": 0.0727864162013157,
+  "mean_decidable_fraction": 0.5041095890410958,
+  "mean_decidable_directional_accuracy": 0.5339095455533812,
+  "confidence_threshold_multiple": 0.95,
+  "prediction_std": 0.0024425044474652236,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\ml\\model_store\\SOLUSD_4h_20260821105527.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.5068493150684932,
+      "information_coefficient": 0.0,
+      "rmse": 0.017335493642161474,
+      "n_test": 73,
+      "decidable_fraction": 1.0,
+      "decidable_directional_accuracy": 0.5068493150684932
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.6027397260273972,
+      "information_coefficient": 0.17773561056353268,
+      "rmse": 0.008792842027812789,
+      "n_test": 73,
+      "decidable_fraction": 0.3835616438356164,
+      "decidable_directional_accuracy": 0.5714285714285714
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.5616438356164384,
+      "information_coefficient": 0.06445143773910898,
+      "rmse": 0.007466770876498419,
+      "n_test": 73,
+      "decidable_fraction": 0.3698630136986301,
+      "decidable_directional_accuracy": 0.5555555555555556
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.5616438356164384,
+      "information_coefficient": 0.11233493767740346,
+      "rmse": 0.007448689937792783,
+      "n_test": 73,
+      "decidable_fraction": 0.3835616438356164,
+      "decidable_directional_accuracy": 0.6428571428571429
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.5068493150684932,
+      "information_coefficient": 0.009410095026533383,
+      "rmse": 0.01101695260946229,
+      "n_test": 73,
+      "decidable_fraction": 0.3835616438356164,
+      "decidable_directional_accuracy": 0.39285714285714285
+    }
+  ]
+}

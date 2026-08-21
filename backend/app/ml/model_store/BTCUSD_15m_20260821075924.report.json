@@ -1,0 +1,48 @@
+{
+  "symbol": "BTCUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "trained_at": "2026-08-21T07:59:24.674970+00:00",
+  "n_samples": 4925,
+  "mean_directional_accuracy": 0.4939024390243903,
+  "mean_information_coefficient": -0.02690171005940555,
+  "prediction_std": 0.0028211803873185756,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\ml\\model_store\\BTCUSD_15m_20260821075924.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.4475609756097561,
+      "information_coefficient": -0.08762256034173088,
+      "rmse": 0.007828094750005107,
+      "n_test": 820
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.5414634146341464,
+      "information_coefficient": 0.0775535940774015,
+      "rmse": 0.005720934379284124,
+      "n_test": 820
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.5121951219512195,
+      "information_coefficient": -0.005498020453426559,
+      "rmse": 0.007004729374020615,
+      "n_test": 820
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.49390243902439024,
+      "information_coefficient": -0.07271852890873118,
+      "rmse": 0.004723380849445898,
+      "n_test": 820
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.474390243902439,
+      "information_coefficient": -0.04622303467054062,
+      "rmse": 0.010327315646959413,
+      "n_test": 820
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "symbol": "ETHUSD",
+  "resolution": "15m",
+  "horizon_bars": 15,
+  "trained_at": "2026-08-21T07:57:17.761601+00:00",
+  "n_samples": 4925,
+  "mean_directional_accuracy": 0.5360975609756098,
+  "mean_information_coefficient": 0.05928941703675413,
+  "prediction_std": 0.004579246737380863,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\ml\\model_store\\ETHUSD_15m_20260821075717.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.6109756097560975,
+      "information_coefficient": 0.29061488208275293,
+      "rmse": 0.009651135217243692,
+      "n_test": 820
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.4060975609756098,
+      "information_coefficient": -0.14847683696164327,
+      "rmse": 0.00937697806069761,
+      "n_test": 820
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.5768292682926829,
+      "information_coefficient": 0.0015357388602767698,
+      "rmse": 0.009686013396448166,
+      "n_test": 820
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.5536585365853659,
+      "information_coefficient": 0.12971163336601593,
+      "rmse": 0.007136076697771465,
+      "n_test": 820
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.5329268292682927,
+      "information_coefficient": 0.023061667836368246,
+      "rmse": 0.016753553487813967,
+      "n_test": 820
+    }
+  ]
+}
