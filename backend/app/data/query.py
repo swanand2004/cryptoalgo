@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 import pandas as pd
 from sqlalchemy import select
 
@@ -54,11 +56,26 @@ async def load_fills(mode: str, symbol: str | None = None, limit: int = 100) -> 
         return list(result.scalars().all())
 
 
-async def load_closed_trades(mode: str, symbol: str | None = None, limit: int = 100) -> list[ClosedTrade]:
+async def load_closed_trades(
+    mode: str,
+    symbol: str | None = None,
+    date_from: dt.datetime | None = None,
+    date_to: dt.datetime | None = None,
+    limit: int = 100,
+) -> list[ClosedTrade]:
+    """date_from/date_to filter on exit_time (when the trade actually
+    closed) -- the same column the results are already sorted by, and the
+    one the composite index (symbol, mode, exit_time) covers, so the filter
+    stays efficient even as trade history grows. Both bounds are inclusive.
+    """
     async with SessionLocal() as session:
         stmt = select(ClosedTrade).where(ClosedTrade.mode == mode)
         if symbol:
             stmt = stmt.where(ClosedTrade.symbol == symbol)
+        if date_from is not None:
+            stmt = stmt.where(ClosedTrade.exit_time >= date_from)
+        if date_to is not None:
+            stmt = stmt.where(ClosedTrade.exit_time <= date_to)
         stmt = stmt.order_by(ClosedTrade.exit_time.desc()).limit(limit)
         result = await session.execute(stmt)
         return list(result.scalars().all())

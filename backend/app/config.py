@@ -93,6 +93,14 @@ class Settings(BaseSettings):
     # this never blocks managing risk on positions already open.
     max_concurrent_positions: int = 5
     max_daily_loss_usd: float = 200
+    # Mirror of max_daily_loss_usd for the upside: once today's mark-to-market
+    # gain reaches this fraction of the day's STARTING equity, trading halts
+    # and flattens for the rest of the day (see risk_manager.check_daily_
+    # profit_target / scheduler._daily_profit_target_supervisor) -- locking in
+    # a good day instead of risking giving it back. A percentage rather than
+    # a fixed dollar figure (unlike the loss limit) because a profit TARGET is
+    # naturally expressed relative to what you started the day with.
+    daily_profit_target_pct: float = 0.10
     paper_starting_balance_usd: float = 10000
     atr_stop_multiple: float = 2.0  # stop-loss distance, in ATRs, from entry
     atr_take_profit_multiple: float = 3.0  # take-profit distance, in ATRs (1.5:1 reward:risk)

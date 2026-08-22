@@ -13,10 +13,15 @@ venv/
 
 # DB / data
 backend/*.db
+backend/*.db-shm
+backend/*.db-wal
 backend/*.sqlite3
 backend/app/ml/model_store/*.pkl
 backend/app/ml/model_store/*.txt
 !backend/app/ml/model_store/.gitkeep
+backend/app/gold/model_store/*.pkl
+backend/app/gold/model_store/*.txt
+!backend/app/gold/model_store/.gitkeep
 
 # Ephemeris data (~17MB, downloaded automatically by skyfield on first use)
 backend/app/astro/data/*.bsp

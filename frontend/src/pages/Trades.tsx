@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, netPnl } from '../lib/api'
-import { formatISTShort } from '../lib/time'
+import { formatISTShort, istDateEndUtc, istDateStartUtc } from '../lib/time'
 
 function formatDuration(entryIso: string, exitIso: string): string {
   const ms = new Date(exitIso).getTime() - new Date(entryIso).getTime()
@@ -27,10 +27,21 @@ export default function Trades() {
   const mode = modeOverride ?? (actualMode as 'paper' | 'live')
   const setMode = setModeOverride
   const [view, setView] = useState<'trades' | 'orders'>('trades')
+  // Plain YYYY-MM-DD strings from <input type="date">, interpreted as IST
+  // calendar dates (matching how every timestamp elsewhere is displayed) --
+  // converted to UTC instants only at the query boundary.
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
 
   const tradesQuery = useQuery({
-    queryKey: ['closed_trades', mode],
-    queryFn: () => api.closedTrades(mode),
+    queryKey: ['closed_trades', mode, dateFrom, dateTo],
+    queryFn: () =>
+      api.closedTrades(
+        mode,
+        undefined,
+        dateFrom ? istDateStartUtc(dateFrom) : undefined,
+        dateTo ? istDateEndUtc(dateTo) : undefined
+      ),
     enabled: view === 'trades',
     refetchInterval: 5000,
   })
@@ -80,6 +91,38 @@ export default function Trades() {
             Viewing {mode.toUpperCase()} history -- account is currently {actualMode.toUpperCase()}
           </div>
         )}
+
+        {view === 'trades' && (
+          <div className="flex items-center gap-2 ml-auto text-sm">
+            <label className="text-neutral-500 text-xs">From</label>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              max={dateTo || undefined}
+              className="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-200 text-xs [color-scheme:dark]"
+            />
+            <label className="text-neutral-500 text-xs">To</label>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              min={dateFrom || undefined}
+              className="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-200 text-xs [color-scheme:dark]"
+            />
+            {(dateFrom || dateTo) && (
+              <button
+                onClick={() => {
+                  setDateFrom('')
+                  setDateTo('')
+                }}
+                className="text-xs text-neutral-500 hover:text-neutral-300 underline"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="rounded-lg border border-neutral-800 bg-neutral-900 overflow-x-auto">
@@ -107,7 +150,7 @@ export default function Trades() {
               {(tradesQuery.data ?? []).length === 0 && (
                 <tr>
                   <td colSpan={14} className="py-6 text-center text-neutral-600">
-                    No closed trades yet in {mode} mode
+                    No closed trades in {mode} mode{(dateFrom || dateTo) ? ' for the selected date range' : ' yet'}
                   </td>
                 </tr>
               )}

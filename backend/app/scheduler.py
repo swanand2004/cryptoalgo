@@ -15,6 +15,8 @@ from app.data.app_state import (
 )
 from app.data.flush import flush_market_cache_to_db
 from app.data.ingest_rest import backfill_symbol_history
+from app.gold.engine import build_gold_snapshot, save_gold_snapshot
+from app.gold.ingest import gold_incremental_backfill
 from app.ml.train import train_and_save
 from app.trading_loop import run_trading_tick
 
@@ -67,6 +69,10 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
     scheduler.add_job(
         _daily_loss_supervisor, "interval", seconds=15, args=[runtime], id="daily_loss_supervisor", max_instances=1, next_run_time=now
     )
+    scheduler.add_job(
+        _daily_profit_target_supervisor, "interval", seconds=15, args=[runtime],
+        id="daily_profit_target_supervisor", max_instances=1, next_run_time=now,
+    )
     # Runs once daily at 03:00 UTC (off-peak). Models were manually retrained
     # 2026-08-19 after fixing the spot-index/funding-window feature bugs (see
     # scheduler._incremental_backfill and feature_pipeline.build_feature_frame)
@@ -76,6 +82,17 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
     scheduler.add_job(
         _record_equity, "interval", seconds=60, args=[runtime], id="record_equity", max_instances=1, next_run_time=now
     )
+
+    # Gold research: NOT part of trading (no PaperBroker position, no PnL --
+    # per explicit request, a pure prediction/research page) -- its own
+    # continuous data refresh + full parameter-bank recompute, independent
+    # of every crypto job above.
+    scheduler.add_job(
+        _gold_research_tick, "interval", minutes=3, args=[runtime], id="gold_research_tick", max_instances=1, next_run_time=now,
+    )
+    # Offset from ml_retrain (03:00) to avoid both heavy retrains competing
+    # for CPU at the exact same moment.
+    scheduler.add_job(_gold_retrain, "cron", hour=3, minute=30, args=[runtime], id="gold_retrain", max_instances=1)
 
     return scheduler
 
@@ -257,6 +274,42 @@ async def _daily_loss_supervisor(runtime) -> None:
         await set_state("daily_kill_switch_auto_triggered_day", today)
 
 
+async def _daily_profit_target_supervisor(runtime) -> None:
+    """Mirror of _daily_loss_supervisor for the upside: once today's mark-
+    to-market gain hits settings.daily_profit_target_pct of the day's
+    starting equity, auto-engages the kill switch and flattens every open
+    position -- locking in a good day instead of risking giving it back.
+
+    Same "fires at most once per calendar day, respects a later manual
+    re-enable" semantics as the loss supervisor, tracked by its OWN
+    persisted flag (daily_profit_target_auto_triggered_day) so it can never
+    be confused with, or blocked by, the separate loss-breach flag -- PnL
+    can't be breaching both limits at once, but keeping the flags distinct
+    means a target-triggered halt and a loss-triggered halt are always
+    logged and re-armed independently.
+    """
+    if await is_kill_switch_on():
+        return  # already engaged (manually, or by this job earlier today) -- nothing to do
+
+    equity = await runtime.order_manager.get_equity()
+    ok, reason = await runtime.risk_manager.check_daily_profit_target(equity)
+    if ok:
+        return
+
+    today = runtime.risk_manager.daily_pnl.day.isoformat()
+    if await get_state("daily_profit_target_auto_triggered_day") == today:
+        return  # already auto-triggered (and possibly manually re-enabled since) today
+
+    logger.warning("Daily profit target reached -- auto-engaging kill switch: %s", reason)
+    try:
+        mode_to_flatten = await get_trading_mode()
+        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten)
+        await set_kill_switch(True)
+        await set_trading_mode("paper")
+    finally:
+        await set_state("daily_profit_target_auto_triggered_day", today)
+
+
 async def _retrain_models(runtime) -> None:
     from app.data.query import load_candles_df, load_pseudo_series_df
     from app.features.feature_pipeline import build_feature_frame
@@ -299,3 +352,41 @@ async def _retrain_models(runtime) -> None:
                 logger.exception("Retrain failed for %s %s", symbol, resolution)
 
     await runtime.refresh_ensembles()
+
+
+async def _gold_research_tick(runtime) -> None:
+    """Gold's own continuous research loop: refresh `.DEXAUTUSD` candles,
+    recompute the full parameter bank + both horizon predictions, and
+    persist the result for the API route to serve instantly. Entirely
+    independent of trading -- no PaperBroker position, no PnL, no risk
+    manager involvement -- per explicit request that this be a pure
+    prediction/research page.
+    """
+    try:
+        await gold_incremental_backfill(runtime.rest_client)
+        snapshot = await build_gold_snapshot()
+        save_gold_snapshot(snapshot)
+    except Exception:
+        logger.exception("Gold research tick failed")
+
+
+async def _gold_retrain(runtime) -> None:
+    from app.data.query import load_candles_df
+    from app.gold.features import build_gold_feature_frame
+    from app.gold.train import GOLD_HORIZONS, train_and_save_gold
+
+    for horizon, cfg in GOLD_HORIZONS.items():
+        try:
+            from app.gold.ingest import GOLD_SPOT_SYMBOL
+
+            candles = await load_candles_df(GOLD_SPOT_SYMBOL, cfg["resolution"], limit=cfg["limit"])
+            if len(candles) < 90:
+                logger.info("Skipping gold %s retrain: only %d candles", horizon, len(candles))
+                continue
+            features = build_gold_feature_frame(candles)
+            train_and_save_gold(
+                features, horizon=horizon, horizon_bars=cfg["horizon_bars"], resolution=cfg["resolution"],
+                feature_columns=cfg["feature_columns"], warmup_bars=cfg["warmup_bars"], n_splits=cfg["n_splits"],
+            )
+        except Exception:
+            logger.exception("Gold retrain failed for %s", horizon)

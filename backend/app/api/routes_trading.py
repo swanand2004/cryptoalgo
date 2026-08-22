@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -151,8 +153,14 @@ async def get_orders(mode: str = "paper", symbol: str | None = None):
 
 
 @router.get("/closed_trades")
-async def get_closed_trades(mode: str = "paper", symbol: str | None = None, runtime: Runtime = Depends(get_runtime)):
-    rows = await load_closed_trades(mode, symbol)
+async def get_closed_trades(
+    mode: str = "paper",
+    symbol: str | None = None,
+    date_from: dt.datetime | None = None,
+    date_to: dt.datetime | None = None,
+    runtime: Runtime = Depends(get_runtime),
+):
+    rows = await load_closed_trades(mode, symbol, date_from=date_from, date_to=date_to)
     # t.leverage is a genuinely selected tier (fixed at entry, 10-50x by
     # conviction -- see select_leverage), so notional/leverage is meaningful
     # margin, not a rounded display artifact. required_margin is just a

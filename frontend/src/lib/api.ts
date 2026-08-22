@@ -137,6 +137,72 @@ export interface MlPrediction {
   resolution: string
 }
 
+export interface GoldPrediction {
+  score: number | null
+  decidable: boolean
+  resolution: string
+  horizon_bars: number
+  action: 'BUY' | 'SELL' | 'HOLD'
+  target_price: number | null
+  expected_move_pct: number | null
+  valid_until: string
+  n_samples: number | null
+  mean_directional_accuracy: number | null
+  mean_information_coefficient: number | null
+}
+
+export interface GoldSeasonality {
+  month: string
+  effect: 'positive' | 'negative' | 'neutral'
+  note: string
+  source: string
+}
+
+export interface GoldTithiEvent {
+  days_away: number | null
+  date: string | null
+  label: string
+}
+
+export interface GoldMacroEvent {
+  event: 'FOMC' | 'CPI' | 'NFP' | null
+  hours_away: number | null
+  at: string | null
+}
+
+export interface GoldEvents {
+  seasonality: GoldSeasonality
+  gold_buying_tithis: {
+    shukla_tritiya: GoldTithiEvent
+    krishna_trayodashi: GoldTithiEvent
+  }
+  next_macro_event: GoldMacroEvent
+}
+
+export interface GoldCryptoAsset {
+  correlation: number | null
+  interpretation: 'moving_with' | 'moving_against' | 'loosely_with' | 'loosely_against' | 'decoupled' | 'unknown'
+  recent_return_pct: number | null
+}
+
+export interface GoldCrossAsset {
+  ready: boolean
+  resolution: string | null
+  window_bars: number | null
+  assets: Record<string, GoldCryptoAsset>
+}
+
+export interface GoldSnapshot {
+  ready: boolean
+  as_of: string | null
+  price: number | null
+  regime: 'trending' | 'mean_reverting' | 'random_walk' | 'unknown'
+  indicators: Record<string, number>
+  predictions: Record<string, GoldPrediction>
+  events?: GoldEvents
+  cross_asset?: GoldCrossAsset
+}
+
 export const api = {
   symbols: () => req<ProductInfo[]>('/market/symbols'),
   ticker: (symbol: string) => req<TickerInfo>(`/market/${symbol}/ticker`),
@@ -156,11 +222,19 @@ export const api = {
     req<OrderRow[]>(`/trading/orders?mode=${mode}${symbol ? `&symbol=${symbol}` : ''}`),
   fills: (mode: string, symbol?: string) =>
     req<FillRow[]>(`/trading/fills?mode=${mode}${symbol ? `&symbol=${symbol}` : ''}`),
-  closedTrades: (mode: string, symbol?: string) =>
-    req<ClosedTradeRow[]>(`/trading/closed_trades?mode=${mode}${symbol ? `&symbol=${symbol}` : ''}`),
+  closedTrades: (mode: string, symbol?: string, dateFromUtc?: string, dateToUtc?: string) =>
+    req<ClosedTradeRow[]>(
+      `/trading/closed_trades?mode=${mode}${symbol ? `&symbol=${symbol}` : ''}` +
+        `${dateFromUtc ? `&date_from=${encodeURIComponent(dateFromUtc)}` : ''}` +
+        `${dateToUtc ? `&date_to=${encodeURIComponent(dateToUtc)}` : ''}`
+    ),
   mlPredictions: () => req<Record<string, Record<string, MlPrediction>>>('/trading/ml_predictions'),
 
   strategies: () => req<StrategyConfigRow[]>('/strategies'),
   updateStrategy: (name: string, body: { enabled?: boolean; weight?: number }) =>
     req<StrategyConfigRow>(`/strategies/${name}`, { method: 'PUT', body: JSON.stringify(body) }),
+
+  goldSnapshot: () => req<GoldSnapshot>('/gold/snapshot'),
+  goldCandles: (resolution = '1h', limit = 300) =>
+    req<Candle[]>(`/gold/candles?resolution=${resolution}&limit=${limit}`),
 }

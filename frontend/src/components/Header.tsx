@@ -9,6 +9,7 @@ const NAV = [
   { to: '/markets', label: 'Markets' },
   { to: '/strategies', label: 'Strategies' },
   { to: '/trades', label: 'Trades' },
+  { to: '/gold', label: 'Gold' },
 ]
 
 export function Header() {

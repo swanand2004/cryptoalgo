@@ -88,6 +88,31 @@ class RiskManager:
             )
         return True, ""
 
+    async def check_daily_profit_target(self, equity: float) -> tuple[bool, str]:
+        """Mirror of check_daily_loss for the upside: once today's mark-to-
+        market gain reaches `daily_profit_target_pct` of the day's starting
+        equity, stop -- lock the day in rather than risk giving it back.
+        Shares the exact same DailyPnLTracker/starting_equity anchor as
+        check_daily_loss (one "today" concept, two symmetric limits on it).
+        """
+        self.daily_pnl.roll_if_new_day(equity)
+        if self.daily_pnl.starting_equity == 0.0:
+            self.daily_pnl.starting_equity = equity
+        await self._persist_daily_pnl_state()
+
+        if self.daily_pnl.starting_equity <= 0:
+            return True, ""  # nothing to take a percentage of yet
+
+        total_pnl_today = equity - self.daily_pnl.starting_equity
+        target_usd = self.daily_pnl.starting_equity * self.settings.daily_profit_target_pct
+        if total_pnl_today >= target_usd:
+            return False, (
+                f"Daily profit target reached: equity +{total_pnl_today:.2f} USD today "
+                f"(started {self.daily_pnl.starting_equity:.2f}, now {equity:.2f}) "
+                f">= +{target_usd:.2f} USD ({self.settings.daily_profit_target_pct:.0%})"
+            )
+        return True, ""
+
     async def record_realized_pnl(self, pnl: float) -> None:
         self.daily_pnl.add_realized(pnl)
         await self._persist_daily_pnl_state()

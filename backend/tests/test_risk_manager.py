@@ -77,6 +77,58 @@ async def test_daily_loss_check_is_mark_to_market_not_realized_only():
 
 
 @pytest.mark.asyncio
+async def test_daily_profit_target_not_reached_below_the_threshold():
+    rm = RiskManager(_settings(daily_profit_target_pct=0.10))
+
+    ok, _ = await rm.check_daily_profit_target(10_000)  # establishes starting_equity
+    assert ok
+
+    ok, reason = await rm.check_daily_profit_target(10_500)  # only +5%, target is +10%
+    assert ok
+    assert reason == ""
+
+
+@pytest.mark.asyncio
+async def test_daily_profit_target_reached_at_the_threshold():
+    rm = RiskManager(_settings(daily_profit_target_pct=0.10))
+
+    await rm.check_daily_profit_target(10_000)  # establishes starting_equity
+
+    ok, reason = await rm.check_daily_profit_target(11_000)  # exactly +10%
+    assert not ok
+    assert "Daily profit target reached" in reason
+
+
+@pytest.mark.asyncio
+async def test_daily_profit_target_is_mark_to_market_not_realized_only():
+    """Same principle as the loss-limit check: an open, still-unrealized
+    gain counts immediately, not only once a trade actually closes."""
+    rm = RiskManager(_settings(daily_profit_target_pct=0.10))
+
+    await rm.check_daily_profit_target(10_000)  # establishes starting_equity
+
+    # No trades ever closed (record_realized_pnl never called) -- purely a
+    # mark-to-market gain on a still-open position.
+    ok, reason = await rm.check_daily_profit_target(11_200)
+    assert not ok
+    assert "Daily profit target reached" in reason
+
+
+@pytest.mark.asyncio
+async def test_daily_profit_target_and_daily_loss_share_the_same_starting_equity():
+    """Both checks anchor to the SAME DailyPnLTracker.starting_equity -- one
+    "today" concept, two symmetric limits on it -- so whichever check runs
+    first establishes it for both."""
+    rm = RiskManager(_settings(daily_profit_target_pct=0.10, max_daily_loss_usd=100))
+
+    await rm.check_daily_loss(10_000)  # establishes starting_equity via the OTHER check
+
+    ok, reason = await rm.check_daily_profit_target(11_000)
+    assert not ok
+    assert "started 10000.00" in reason
+
+
+@pytest.mark.asyncio
 async def test_manually_engaged_kill_switch_still_blocks_trading():
     from app.data.app_state import set_kill_switch
 
