@@ -15,7 +15,14 @@ from app.risk.risk_manager import RiskManager
 from app.strategy.base import Strategy
 from app.strategy.ensemble import SignalEnsemble, WeightedStrategy
 from app.strategy.trend_momentum import TrendMomentumStrategy
-from app.trading_loop import _tick_symbol, drop_incomplete_last_bar, get_live_signals
+from app.execution.broker_base import OrderRequest
+from app.trading_loop import (
+    CONSOLIDATED_STRATEGY,
+    _compute_member_target,
+    _tick_symbol,
+    drop_incomplete_last_bar,
+    get_live_signals,
+)
 
 RES = 900  # 15m
 
@@ -215,20 +222,19 @@ async def _seed_testusd_candles(n: int = 300, seed: int = 3) -> None:
 
 
 @pytest.mark.asyncio
-async def test_coinciding_fresh_entries_are_consolidated_into_one_position():
-    """The exact scenario reported live: two strategies both open a fresh,
-    same-direction position on the same symbol at the same tick (e.g. graha
-    and trend_momentum both hitting full conviction on one clean SOL rally).
-    Only ONE position should result -- owned by the higher-conviction
-    strategy, sized as the SUM of what both independently wanted -- not two
-    separate positions paying double margin and fees for one bet.
+async def test_multiple_strategies_produce_exactly_one_blended_position():
+    """The core of the 2026-08-31 consolidation: however many strategies are
+    enabled, a symbol gets exactly ONE position, built from their weighted
+    blend. Previously each member held its own -- which measured out at 0.733
+    mean pairwise correlation, i.e. paying three sets of fees and three lots
+    of margin for ~1.3 effective bets.
     """
     await _seed_testusd_candles()
     settings = _consolidation_settings()
     registry = _registry_with_testusd()
 
-    weak_long = _ConstantSignalStrategy("weak_long", 0.5)  # clears entry threshold, lower conviction
-    strong_long = _ConstantSignalStrategy("strong_long", 0.9)  # higher conviction -- should become primary
+    weak_long = _ConstantSignalStrategy("weak_long", 0.5)
+    strong_long = _ConstantSignalStrategy("strong_long", 0.9)
     ensemble = SignalEnsemble(
         [
             WeightedStrategy(weak_long, weight=1.0, enabled=True),
@@ -240,41 +246,50 @@ async def test_coinciding_fresh_entries_are_consolidated_into_one_position():
     await _tick_symbol(runtime, "TESTUSD")
 
     positions = await runtime.order_manager.get_positions()
-    weak_key = "TESTUSD:weak_long"
-    strong_key = "TESTUSD:strong_long"
+    testusd = {k: v for k, v in positions.items() if k.startswith("TESTUSD:") and v.size != 0}
 
-    assert weak_key not in positions  # consolidated away -- no separate position
-    assert strong_key in positions  # the higher-conviction strategy owns the combined position
-    assert positions[strong_key].size > 0
+    assert len(testusd) == 1, f"expected exactly one blended position, got {list(testusd)}"
+    assert f"TESTUSD:{CONSOLIDATED_STRATEGY}" in testusd
+    assert "TESTUSD:weak_long" not in positions
+    assert "TESTUSD:strong_long" not in positions
 
 
 @pytest.mark.asyncio
-async def test_consolidated_size_matches_the_capped_sum_of_both_strategies_own_targets():
-    """The consolidated order must be built from the SUM of what weak_long
-    and strong_long each independently wanted -- not just the larger one's
-    own size alone -- and THEN run through the exact same per-trade margin
-    cap (risk_manager.cap_position_size) any single trade would be, at the
-    higher-conviction (primary) strategy's leverage tier.
-
-    Under fixed_margin_contracts, every trade -- including each one of these
-    two BEFORE consolidation -- independently targets the full configured
-    margin_per_trade_pct of equity. Two coinciding fresh entries summed
-    together therefore naturally want roughly double a single trade's normal
-    margin budget, so the per-trade cap now genuinely (and correctly) binds
-    on the consolidated order every time, rather than being a rare ceiling
-    like the old ATR-risk-targeted sizing left it. This test verifies the
-    executed size against risk_manager.cap_position_size itself (already
-    unit-tested in test_risk_manager.py) rather than re-deriving the cap
-    formula by hand, so it can't drift from what production actually applies.
+async def test_legacy_per_member_positions_are_closed_on_consolidation():
+    """Positions opened under the OLD per-member design are no longer managed
+    by the loop, so they must be closed rather than orphaned to drift until
+    their stop or target happens to fire.
     """
     await _seed_testusd_candles()
-    # Realistic (default) leverage bounds -- NOT an artificially huge range.
-    # select_leverage rounds its result, and at an extreme max_leverage the
-    # rounding granularity is so coarse that ordinary float noise between two
-    # independently-run feature/signal pipelines (this test's hand-built one
-    # vs _tick_symbol's own) shifts the resulting leverage tier enough to
-    # throw off the expected contract count by a lot. At default bounds
-    # (10-50x) that noise doesn't move the rounded tier at all.
+    settings = _consolidation_settings()
+    registry = _registry_with_testusd()
+
+    strat = _ConstantSignalStrategy("trend_momentum", 0.8)
+    ensemble = SignalEnsemble([WeightedStrategy(strat, weight=1.0, enabled=True)])
+    runtime = _FullFakeRuntime(registry, {"TESTUSD": ensemble}, settings)
+
+    # A leftover position tagged with an individual member's name.
+    await runtime.order_manager.paper_broker.place_order(
+        OrderRequest(symbol="TESTUSD", side="buy", size=50, order_type="market",
+                     strategy="trend_momentum", atr=1.0, quality=1.0)
+    )
+    assert (await runtime.order_manager.get_positions())["TESTUSD:trend_momentum"].size == 50
+
+    await _tick_symbol(runtime, "TESTUSD")
+
+    positions = await runtime.order_manager.get_positions()
+    assert "TESTUSD:trend_momentum" not in positions, "legacy member position was left orphaned"
+
+
+@pytest.mark.asyncio
+async def test_consolidated_position_is_sized_as_one_trade_not_a_sum_of_members():
+    """Under consolidation the blended signal produces ONE ordinary trade, so
+    it must be sized like one -- a single margin_per_trade_pct allocation at
+    the blend's own conviction -- not the sum of what each member would have
+    wanted separately (which is what the old per-member design produced, and
+    why the per-trade margin cap used to bind on essentially every entry).
+    """
+    await _seed_testusd_candles()
     settings = Settings(delta_api_key="k", delta_api_secret="s")
     registry = _registry_with_testusd()
     product = registry.get("TESTUSD")
@@ -291,19 +306,15 @@ async def test_consolidated_size_matches_the_capped_sum_of_both_strategies_own_t
 
     from app.data.query import load_candles_df
     from app.features.feature_pipeline import build_feature_frame
-    from app.trading_loop import _compute_member_target
 
-    candles = await load_candles_df("TESTUSD", "15m", limit=400)
+    candles = await load_candles_df("TESTUSD", "4h", limit=400)
+    if len(candles) < 50:
+        candles = await load_candles_df("TESTUSD", "15m", limit=400)
     features = build_feature_frame(candles)
-    # _tick_symbol prices off runtime.cache.get_last_price (orderbook mid)
-    # FIRST, falling back to the candle close only if the cache has no
-    # orderbook -- _FullFakeRuntime seeds bids=999/asks=1001, so the real run
-    # prices at that 1000.0 mid, not the candle close. Must match here too,
-    # or this test's own target/cap computations silently price off a
-    # different number than what actually executes.
     price = runtime.cache.get_last_price("TESTUSD")
-    equity = await runtime.order_manager.get_equity()  # the real starting equity, before any trade
+    equity = await runtime.order_manager.get_equity()
 
+    # What each member would have targeted ON ITS OWN under the old design.
     _, weak_target, _ = _compute_member_target(
         runtime, product, features, price, {}, equity, strategy_name="weak_long",
         signal_ensemble=SignalEnsemble([WeightedStrategy(weak_long, weight=1.0)]),
@@ -312,32 +323,23 @@ async def test_consolidated_size_matches_the_capped_sum_of_both_strategies_own_t
         runtime, product, features, price, {}, equity, strategy_name="strong_long",
         signal_ensemble=SignalEnsemble([WeightedStrategy(strong_long, weight=1.0)]),
     )
-    assert weak_target > 0 and strong_target > 0  # both genuinely want to go long
-    naive_sum = weak_target + strong_target
-
-    expected_capped = runtime.order_manager.risk_manager.cap_position_size(
-        naive_sum, "TESTUSD", price, product.contract_value, equity,
-        current_portfolio_notional_usd=0.0, current_portfolio_margin_usd=0.0, quality=0.9,
-    )
+    naive_sum = abs(weak_target) + abs(strong_target)
 
     await _tick_symbol(runtime, "TESTUSD")
     positions = await runtime.order_manager.get_positions()
-    combined_size = positions["TESTUSD:strong_long"].size
+    size = abs(positions[f"TESTUSD:{CONSOLIDATED_STRATEGY}"].size)
 
-    # The per-trade margin cap must actually be binding here (proving this
-    # test exercises the capped path, not accidentally passing because
-    # nothing needed clipping) -- otherwise a regression that dropped
-    # capping entirely could still pass by coincidence.
-    assert expected_capped < naive_sum
-    # +-1 tolerance for independent int() truncation across the two paths.
-    assert abs(combined_size - expected_capped) <= 1
+    assert size > 0
+    # The whole point of consolidating: one bet's worth of exposure, not two.
+    assert size < naive_sum, f"consolidated size {size} should be below the old summed size {naive_sum}"
 
 
 @pytest.mark.asyncio
-async def test_non_coinciding_entries_are_not_consolidated():
-    """A strategy managing an EXISTING position must never be swept into
-    consolidation just because another strategy opens fresh in the same
-    direction at the same tick -- only simultaneous FROM-FLAT entries merge.
+async def test_position_is_tagged_consolidated_not_by_member_name():
+    """Every live position now carries the single CONSOLIDATED_STRATEGY tag,
+    never an individual member's name -- even when only one strategy is
+    enabled. Positions are keyed by "{symbol}:{strategy}", so a per-member
+    tag here would mean the loop had opened a per-member position again.
     """
     async with SessionLocal() as session:
         for row in _synthetic_candle_rows("TESTUSD", n=300, seed=11):
@@ -354,5 +356,6 @@ async def test_non_coinciding_entries_are_not_consolidated():
     await _tick_symbol(runtime, "TESTUSD")
 
     positions = await runtime.order_manager.get_positions()
-    assert "TESTUSD:solo_long" in positions
-    assert positions["TESTUSD:solo_long"].size > 0
+    assert "TESTUSD:solo_long" not in positions
+    assert f"TESTUSD:{CONSOLIDATED_STRATEGY}" in positions
+    assert positions[f"TESTUSD:{CONSOLIDATED_STRATEGY}"].size > 0

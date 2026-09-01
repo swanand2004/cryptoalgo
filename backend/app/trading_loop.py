@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 SIGNAL_RESOLUTION = "15m"
 SIGNAL_RESOLUTION_SECONDS = 900
 
+# The single strategy tag every live position now carries. As of 2026-08-31
+# the loop trades ONE weighted blend of trend_momentum + graha + tsmom per
+# symbol rather than one position per member -- see _tick_symbol for the
+# measured justification (0.733 mean pairwise correlation between the three,
+# so separate positions were paying triple fees for ~1.3 effective bets).
+CONSOLIDATED_STRATEGY = "consolidated"
+
 # Best-performing timeframe per (symbol, strategy), from isolated backtests
 # across 5m/15m/1h/4h history: every real strategy showed a strong, monotonic
 # relationship between longer timeframe and better risk-adjusted performance
@@ -64,6 +71,14 @@ FAVORABLE_RESOLUTION: dict[str, dict[str, str]] = {
         "tsmom": "4h",
     },
 }
+
+# The consolidated blend trades at 4h on every symbol -- the members all
+# resolved to 4h independently (above), and 4h beat 1h and 15m across the
+# board on the corrected engine, so there is no mixed-timeframe blending to
+# reconcile: signal, ATR-based stop/target, and sizing all come from the
+# same 4h bars.
+for _sym in FAVORABLE_RESOLUTION:
+    FAVORABLE_RESOLUTION[_sym][CONSOLIDATED_STRATEGY] = "4h"
 
 
 def _resolution_for(symbol: str, strategy_name: str) -> str:
@@ -183,7 +198,7 @@ async def _tick_symbol(runtime, symbol: str) -> None:
     # pointed at the same favorable timeframe (almost always just 2-3 distinct
     # resolutions: the 15m baseline plus whichever favorable timeframes this
     # symbol's strategies use).
-    needed_resolutions = {SIGNAL_RESOLUTION} | {
+    needed_resolutions = {SIGNAL_RESOLUTION, _resolution_for(symbol, CONSOLIDATED_STRATEGY)} | {
         _resolution_for(symbol, m.strategy.name) for m in ensemble.members if m.enabled and m.weight > 0
     }
     features_by_resolution: dict[str, pd.DataFrame] = {}
@@ -203,89 +218,54 @@ async def _tick_symbol(runtime, symbol: str) -> None:
     positions = await runtime.order_manager.get_positions()
     equity = await runtime.order_manager.get_equity()
 
-    # Each individually enabled strategy trades its own position, on
-    # ITS OWN favorable timeframe -- both the signal AND the ATR-based stop/
-    # target/sizing come from that same resolution, so a strategy tuned for
-    # 4h isn't undermined by a stop distance still sized off 15m noise.
+    # ONE blended position per symbol (2026-08-31), replacing the previous
+    # "every member trades its own position" design.
     #
-    # First pass: compute (never submit) every member's target. Several
-    # strategies sharing the same underlying trend construction (e.g. graha's
-    # base signal is literally trend_momentum's, only tilted by astrology) can
-    # independently reach full conviction on the same clean move and open a
-    # fresh, same-direction position at the same tick -- two positions for
-    # what is, right now, one bet, paying double margin and fees for it. Only
-    # a coinciding FRESH entry (from flat) is consolidated below; an existing
-    # position being managed is untouched.
-    computed: list[dict] = []
-    for member in ensemble.members:
-        if not member.enabled or member.weight <= 0:
-            continue
-        resolution = _resolution_for(symbol, member.strategy.name)
-        member_features = features_by_resolution.get(resolution)
-        if member_features is None:
-            continue
-        member_atr = (
-            float(member_features["atr_14"].iloc[-1]) if pd.notna(member_features["atr_14"].iloc[-1]) else 0.0
-        )
-        if member_atr <= 0:
-            continue
-        solo_ensemble = SignalEnsemble(
-            [WeightedStrategy(member.strategy, weight=1.0)],
-            deadband=ensemble.deadband,
-            smoothing_span=ensemble.smoothing_span,
-        )
-        if len(member_features) < solo_ensemble.warmup_bars() + 5:
-            continue
-        current, target_contracts, latest_signal = _compute_member_target(
-            runtime, product, member_features, price, positions, equity,
-            strategy_name=member.strategy.name, signal_ensemble=solo_ensemble,
-        )
-        computed.append(
-            {
-                "strategy_name": member.strategy.name,
-                "atr": member_atr,
-                "current": current,
-                "target": target_contracts,
-                "signal": latest_signal,
-            }
-        )
+    # The case for it is measured, not tidiness: the three strategies' actual
+    # return correlation is 0.733 mean pairwise across all 9 strategy/symbol
+    # combos -- about 1.3 effective independent bets out of 9 (see
+    # [[project-risk-controls]]). Running them as separate positions therefore
+    # paid three sets of fees and committed three lots of margin for what is
+    # very nearly a single directional bet, while real closed trades showed
+    # fees eating 36-89% of gross profit. An earlier partial fix here only
+    # merged FRESH same-direction entries; blending at the signal level
+    # instead fixes it for the whole life of the position.
+    #
+    # Validated on the corrected backtest engine (in-sample AND held-out, so
+    # this is not test-window fishing): consolidation beat separate positions
+    # -15.89% vs -22.70% in-sample and +44.49% vs +42.55% out-of-sample,
+    # while cutting trade count ~70% and fees ~70% in both windows.
+    resolution = _resolution_for(symbol, CONSOLIDATED_STRATEGY)
+    blended_features = features_by_resolution.get(resolution)
+    if blended_features is None:
+        blended_features = baseline_features
+    atr = float(blended_features["atr_14"].iloc[-1]) if pd.notna(blended_features["atr_14"].iloc[-1]) else 0.0
+    if atr <= 0 or len(blended_features) < ensemble.warmup_bars() + 5:
+        return
 
-    # Group members opening FRESH (from flat) this tick by direction.
-    fresh_by_direction: dict[int, list[dict]] = {}
-    for entry in computed:
-        if entry["current"] == 0 and entry["target"] != 0:
-            fresh_by_direction.setdefault(1 if entry["target"] > 0 else -1, []).append(entry)
-
-    # Names already handled by the consolidation pass below (both the
-    # primary, executed at the combined size, and the others, skipped
-    # entirely) -- tracked by name so the final loop can't double-execute
-    # or accidentally skip the primary.
-    already_handled: set[str] = set()
-    for direction, entries in fresh_by_direction.items():
-        if len(entries) < 2:
+    # Any position still tagged with an individual member's name predates the
+    # consolidation and is no longer managed by the loop below -- close it out
+    # rather than orphaning it to drift until its stop or target happens to
+    # fire.
+    for key, pos in positions.items():
+        pos_symbol, _, pos_strategy = key.partition(":")
+        if pos_symbol != symbol or pos_strategy == CONSOLIDATED_STRATEGY or pos.size == 0:
             continue
-        primary = max(entries, key=lambda e: abs(e["signal"]))
-        combined_target = direction * sum(abs(e["target"]) for e in entries)
         logger.info(
-            "Coinciding fresh entries on %s: %s all open %s -- consolidating into %s at %d (was %s each)",
-            symbol, [e["strategy_name"] for e in entries], "long" if direction > 0 else "short",
-            primary["strategy_name"], combined_target, [e["target"] for e in entries],
+            "Closing legacy %s position on %s (%d contracts) -- superseded by the consolidated strategy",
+            pos_strategy, symbol, pos.size,
         )
-        await _execute_target(
-            runtime, symbol, product, price, primary["atr"],
-            strategy_name=primary["strategy_name"], current=primary["current"],
-            target_contracts=combined_target, latest_signal=primary["signal"],
-        )
-        already_handled.update(e["strategy_name"] for e in entries)
+        await runtime.order_manager.close_position(symbol, pos_strategy)
 
-    for entry in computed:
-        if entry["strategy_name"] in already_handled:
-            continue
-        await _execute_target(
-            runtime, symbol, product, price, entry["atr"],
-            strategy_name=entry["strategy_name"], current=entry["current"],
-            target_contracts=entry["target"], latest_signal=entry["signal"],
-        )
+    current, target_contracts, latest_signal = _compute_member_target(
+        runtime, product, blended_features, price, positions, equity,
+        strategy_name=CONSOLIDATED_STRATEGY, signal_ensemble=ensemble,
+    )
+    await _execute_target(
+        runtime, symbol, product, price, atr,
+        strategy_name=CONSOLIDATED_STRATEGY, current=current,
+        target_contracts=target_contracts, latest_signal=latest_signal,
+    )
 
 
 async def get_live_signals(runtime, symbol: str) -> list[dict]:

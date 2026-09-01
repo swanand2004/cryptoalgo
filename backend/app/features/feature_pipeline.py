@@ -240,10 +240,58 @@ def build_feature_frame(
         btc = cross_asset_candles.sort_values("time").reset_index(drop=True)
         btc_ret = btc[["time"]].copy()
         btc_ret["btc_ret_5"] = btc["close"].pct_change(5)
+        # BTC's own log return, carried alongside so the residual below can be
+        # computed on the SAME merged grid (merge_asof aligns it to this
+        # symbol's bars; a separate merge would risk a different alignment).
+        btc_ret["_btc_lr"] = np.log(btc["close"]).diff()
         df = pd.merge_asof(df, btc_ret, on="time", direction="backward")
     else:
         df["btc_ret_5"] = np.nan
+        df["_btc_lr"] = np.nan
     df["btc_ret_5"] = df["btc_ret_5"].fillna(0.0)
+
+    # -- Residual (beta-hedged) momentum -----------------------------------
+    # The only signal measured in this project that is genuinely LESS
+    # correlated with the existing book than the book is with itself: the
+    # three live strategies correlate 0.733 with each other (~1.3 effective
+    # bets out of 9 -- see [[project-risk-controls]]), whereas residual
+    # momentum measured 0.339 against plain momentum on ETH and 0.558 on SOL.
+    #
+    # Construction: regress this symbol's return on BTC's over a rolling
+    # window and keep only the part BTC does NOT explain. Measured common-
+    # factor share is 68.9% for ETH and 55.1% for SOL, so 31%/45% of their
+    # movement is idiosyncratic and structurally invisible to an all-trend,
+    # all-directional book.
+    #
+    # Deliberately NaN (not 0.0) for BTC itself: BTC's beta to BTC is exactly
+    # 1, so its residual is identically zero and any "momentum" computed from
+    # it is pure floating-point noise. panel_multi_asset.py's version of this
+    # silently produced a real-looking 0.54 correlation on that degenerate
+    # series -- treat a base-asset residual as missing, never as a signal.
+    lr_own = np.log(df["close"]).diff()
+    if df["_btc_lr"].notna().any():
+        btc_lr = df["_btc_lr"]
+        beta_window = max(2, round(48 * bars_per_hour))  # ~2 days, resolution-scaled
+        cov = lr_own.rolling(beta_window).cov(btc_lr)
+        var = btc_lr.rolling(beta_window).var()
+        beta = cov / var.replace(0, np.nan)
+        # A base asset regressed on itself gives beta ~1 and a ~0 residual --
+        # detect that rather than emitting noise as signal.
+        degenerate = bool(np.isclose(lr_own.corr(btc_lr), 1.0, atol=1e-6))
+        residual = lr_own - beta * btc_lr
+        resid_vol = residual.rolling(beta_window).std()
+        df["btc_beta"] = beta
+        for w in (12, 48):
+            df[f"resid_mom_{w}"] = residual.rolling(w).sum() / (resid_vol * np.sqrt(w))
+        if degenerate:
+            df["btc_beta"] = np.nan
+            for w in (12, 48):
+                df[f"resid_mom_{w}"] = np.nan
+    else:
+        df["btc_beta"] = np.nan
+        for w in (12, 48):
+            df[f"resid_mom_{w}"] = np.nan
+    df = df.drop(columns=["_btc_lr"])
 
     # -- Astrology (app/astro/panchang.py, app/astro/dasha.py) -------------
     # Every one of these mechanisms already exists, independently verified,
