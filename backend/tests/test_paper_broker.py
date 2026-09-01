@@ -459,9 +459,43 @@ async def test_stop_loss_take_profit_stay_fixed_when_position_is_extended():
 
 
 @pytest.mark.asyncio
-async def test_trailing_stop_tightens_as_long_position_moves_favorably():
+async def test_default_settings_trail_aggressively():
+    """Locks in the live default (not just an explicitly-pinned scenario):
+    per an explicit "make the trailing more aggressive" request, the
+    breakeven/tighten trigger dropped from 1.0 to 0.5 ATR and the tightened
+    trail dropped from 0.8 to 0.4 ATR -- a smaller favorable move now counts
+    as "committed" and the stop hugs the peak closer once it does.
+    """
     cache = _cache_with_book(bid=49_990, ask=50_010)
     broker = PaperBroker(_registry(), cache, Settings(delta_api_key="k", delta_api_secret="s"))
+
+    await broker.place_order(
+        OrderRequest(symbol="BTCUSD", side="buy", size=10, order_type="market", strategy="trend_momentum", atr=200.0)
+    )
+    pos_before = await _position("trend_momentum")
+
+    # Only 120 favorable -- below the OLD 1.0-ATR (200) trigger, but past
+    # the NEW 0.5-ATR (100) one.
+    new_peak = pos_before.entry_price + 120
+    cache.update_orderbook("BTCUSD", bids=[[new_peak - 5, 100]], asks=[[new_peak + 5, 100]], timestamp=2)
+    await broker.check_stop_loss_take_profit()
+
+    pos_after = await _position("trend_momentum")
+    assert pos_after.stop_loss_price > pos_before.entry_price  # already floored at breakeven
+    assert pos_after.stop_loss_price == pytest.approx(new_peak - 0.4 * 200.0)  # the new, tighter 0.4-ATR trail
+
+
+@pytest.mark.asyncio
+async def test_trailing_stop_tightens_as_long_position_moves_favorably():
+    """Pins the trigger/trail multiples explicitly (1.0/0.8) rather than
+    relying on Settings' defaults -- this test illustrates the MECHANISM at
+    those specific reference numbers, independent of whatever the live
+    default is currently tuned to (see config.py)."""
+    cache = _cache_with_book(bid=49_990, ask=50_010)
+    settings = Settings(
+        delta_api_key="k", delta_api_secret="s", atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
+    )
+    broker = PaperBroker(_registry(), cache, settings)
 
     await broker.place_order(
         OrderRequest(symbol="BTCUSD", side="buy", size=10, order_type="market", strategy="trend_momentum", atr=200.0)
@@ -489,8 +523,14 @@ async def test_trailing_stop_tightens_as_long_position_moves_favorably():
 
 @pytest.mark.asyncio
 async def test_trailing_stop_never_loosens_when_price_pulls_back():
+    """Pins the trigger/trail multiples explicitly -- the 150-point pullback
+    below is sized specifically to stay above a 0.8-ATR trail (160), which a
+    tighter live default would no longer guarantee."""
     cache = _cache_with_book(bid=49_990, ask=50_010)
-    broker = PaperBroker(_registry(), cache, Settings(delta_api_key="k", delta_api_secret="s"))
+    settings = Settings(
+        delta_api_key="k", delta_api_secret="s", atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
+    )
+    broker = PaperBroker(_registry(), cache, settings)
 
     await broker.place_order(
         OrderRequest(symbol="BTCUSD", side="buy", size=10, order_type="market", strategy="trend_momentum", atr=200.0)
@@ -554,10 +594,12 @@ async def test_small_favorable_move_below_trigger_still_uses_wide_stop():
     """Below the 1-ATR breakeven trigger, the trail must stay at the original
     wide 2-ATR distance and is NOT floored at breakeven -- the tightened trail
     is deliberately reserved for a real, committed move, not any tiny wiggle
-    in the position's favor.
+    in the position's favor. Pins the trigger explicitly (1.0 ATR = 200) --
+    the 150-point rally below is sized specifically to stay under it.
     """
     cache = _cache_with_book(bid=49_990, ask=50_010)
-    broker = PaperBroker(_registry(), cache, Settings(delta_api_key="k", delta_api_secret="s"))
+    settings = Settings(delta_api_key="k", delta_api_secret="s", atr_breakeven_trigger_multiple=1.0)
+    broker = PaperBroker(_registry(), cache, settings)
 
     await broker.place_order(
         OrderRequest(symbol="BTCUSD", side="buy", size=10, order_type="market", strategy="trend_momentum", atr=200.0)
@@ -580,9 +622,14 @@ async def test_fast_spike_short_of_take_profit_then_reversal_locks_in_real_profi
     within a whisker of take-profit (3 ATR) without touching it, then
     reverses. The tightened, breakeven-floored trail should close the
     position for a solid chunk of that move -- not a round-trip to scratch.
+    Pins the trigger/trail multiples explicitly (1.0/0.8) so this test's own
+    math in the comments below stays accurate regardless of the live default.
     """
     cache = _cache_with_book(bid=49_990, ask=50_010)
-    broker = PaperBroker(_registry(), cache, Settings(delta_api_key="k", delta_api_secret="s"))
+    settings = Settings(
+        delta_api_key="k", delta_api_secret="s", atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
+    )
+    broker = PaperBroker(_registry(), cache, settings)
 
     await broker.place_order(
         OrderRequest(symbol="BTCUSD", side="buy", size=10, order_type="market", strategy="trend_momentum", atr=200.0)

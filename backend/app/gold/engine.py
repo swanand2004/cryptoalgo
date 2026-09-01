@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -11,12 +12,12 @@ from app.data.query import load_candles_df
 from app.gold.cross_asset import crypto_correlation_context
 from app.gold.events import build_gold_events
 from app.gold.features import GOLD_FEATURE_COLUMNS, build_gold_feature_frame, gold_regime
+from app.gold.ingest import GOLD_SPOT_SYMBOL
 from app.gold.predict import GoldPredictor
 from app.gold.train import GOLD_HORIZONS, GOLD_MODEL_STORE_DIR
 
 logger = logging.getLogger(__name__)
 
-GOLD_SPOT_SYMBOL = ".DEXAUTUSD"
 _SNAPSHOT_PATH = GOLD_MODEL_STORE_DIR / "gold_snapshot_latest.json"
 
 # Only what's actually used across GOLD_HORIZONS' resolutions -- a small
@@ -87,26 +88,43 @@ def _action_for(score: float | None, decidable: bool) -> str:
     return "HOLD"
 
 
-async def build_gold_snapshot() -> dict:
-    """Computes gold's full research snapshot: current price, the entire
-    GOLD_FEATURE_COLUMNS parameter bank's latest readings, a plain-language
-    regime label, an actionable BUY/SELL/HOLD + price-target + valid-until
-    call for each horizon (intraday ~1h, short-term ~1 day, long-term ~1
-    week), and a real-world Events panel (documented gold seasonality +
-    Hindu-calendar gold-buying tithi proximity). This is the ONE function
-    the scheduler tick and the API route both call -- scheduler persists its
-    result, the route serves the persisted copy, so a slow feature/model
-    computation never blocks a request.
+def _risk_level(mean_directional_accuracy: float | None, n_samples: int | None) -> tuple[str, str]:
+    """Honest risk rating for THIS horizon's model, derived from its own
+    walk-forward track record -- not a generic disclaimer. A call from a
+    model with a real, well-sampled edge is a genuinely different risk than
+    one from a model that hasn't cleared a coin flip yet (see [[project-
+    trading-system-state]] for why gold's short_term/long_term horizons
+    currently sit in the risky end of this scale). Thresholds are fixed
+    ahead of any specific reading, not tuned to make any one horizon look
+    better.
     """
-    now = dt.datetime.now(dt.timezone.utc)
-    resolutions_needed = {cfg["resolution"] for cfg in GOLD_HORIZONS.values()}
-    frames: dict[str, pd.DataFrame] = {}
-    for resolution in resolutions_needed:
-        limit = max(cfg["limit"] for cfg in GOLD_HORIZONS.values() if cfg["resolution"] == resolution)
-        candles = await load_candles_df(GOLD_SPOT_SYMBOL, resolution, limit=limit)
-        if len(candles) < 30:
-            continue
-        frames[resolution] = build_gold_feature_frame(candles)
+    if mean_directional_accuracy is None or n_samples is None:
+        return "very_high", "no validated track record yet"
+    if n_samples < 100:
+        return "very_high", f"only {n_samples} historical samples -- too thin to trust"
+    if mean_directional_accuracy <= 0.50:
+        return "very_high", f"{mean_directional_accuracy:.0%} historical accuracy -- at or below a coin flip"
+    if mean_directional_accuracy < 0.53:
+        return "high", f"{mean_directional_accuracy:.0%} historical accuracy -- only a slight edge"
+    if mean_directional_accuracy < 0.56:
+        return "medium", f"{mean_directional_accuracy:.0%} historical accuracy -- a modest, unproven edge"
+    return "low", f"{mean_directional_accuracy:.0%} historical accuracy across {n_samples} samples"
+
+
+def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.datetime) -> dict:
+    """The actual CPU-heavy work (feature computation, prediction) -- kept
+    fully synchronous and called via asyncio.to_thread by build_gold_snapshot
+    below, never awaited directly on the main event loop. Real bug caught
+    live (2026-08-25): running this inline inside an `async def` still
+    blocks the loop for its ENTIRE duration (Python's GIL-bound CPU work
+    doesn't yield just because the function is declared async) -- once
+    PAXG's ~127k-row intraday history made hurst_exponent's rolling
+    calculation take 30+ minutes, that froze the whole app (crypto trading's
+    own risk supervisors and HTTP routes included), not just gold.
+    """
+    frames: dict[str, pd.DataFrame] = {
+        resolution: build_gold_feature_frame(candles) for resolution, candles in raw_candles.items()
+    }
 
     # The finest-grained resolution in play (intraday, 15m) makes the
     # freshest "current reading" -- short_term/long_term still predict off
@@ -122,7 +140,6 @@ async def build_gold_snapshot() -> dict:
             "indicators": {},
             "predictions": {},
             "events": build_gold_events(now),
-            "cross_asset": await crypto_correlation_context(),
         }
 
     last = display_frame.iloc[-1]
@@ -138,18 +155,26 @@ async def build_gold_snapshot() -> dict:
         resolution_seconds = _RESOLUTION_SECONDS[cfg["resolution"]]
         valid_until = (now + dt.timedelta(seconds=cfg["horizon_bars"] * resolution_seconds)).isoformat()
 
+        risk_level, risk_reason = _risk_level(
+            report_summary.get("mean_directional_accuracy"), report_summary.get("n_samples")
+        )
+
         if frame is None or frame.empty or not predictor.is_ready:
             predictions[horizon] = {
                 "score": None, "decidable": False, "resolution": cfg["resolution"], "horizon_bars": cfg["horizon_bars"],
                 "action": "HOLD", "target_price": None, "expected_move_pct": None, "valid_until": valid_until,
+                "risk_level": risk_level, "risk_reason": risk_reason,
                 **report_summary,
             }
             continue
 
-        gated = predictor.predict_score_batch(frame, require_confidence=True)
-        ungated = predictor.predict_score_batch(frame, require_confidence=False)
-        gated_last = float(gated.iloc[-1])
-        ungated_last = float(ungated.iloc[-1])
+        # Only the LAST row's score is ever used below -- batch-predicting
+        # across the entire (now much larger) history was pure waste, and
+        # part of the same slow-tick problem this function's docstring
+        # describes.
+        tail = frame.tail(1)
+        gated_last = float(predictor.predict_score_batch(tail, require_confidence=True).iloc[-1])
+        ungated_last = float(predictor.predict_score_batch(tail, require_confidence=False).iloc[-1])
         decidable = gated_last != 0.0 or ungated_last == 0.0
 
         raw_return = predictor.predict_raw_return_last(frame)
@@ -162,6 +187,7 @@ async def build_gold_snapshot() -> dict:
             "target_price": _clean(target_price) if target_price is not None else None,
             "expected_move_pct": _clean(raw_return * 100) if raw_return is not None else None,
             "valid_until": valid_until,
+            "risk_level": risk_level, "risk_reason": risk_reason,
             **report_summary,
         }
 
@@ -173,5 +199,35 @@ async def build_gold_snapshot() -> dict:
         "indicators": indicators,
         "predictions": predictions,
         "events": build_gold_events(now),
-        "cross_asset": await crypto_correlation_context(),
     }
+
+
+async def build_gold_snapshot() -> dict:
+    """Computes gold's full research snapshot: current price, the entire
+    GOLD_FEATURE_COLUMNS parameter bank's latest readings, a plain-language
+    regime label, an actionable BUY/SELL/HOLD + price-target + valid-until
+    call for each horizon (intraday ~1h, short-term ~1 day, long-term ~1
+    week), and a real-world Events panel (documented gold seasonality +
+    Hindu-calendar gold-buying tithi proximity). This is the ONE function
+    the scheduler tick and the API route both call -- scheduler persists its
+    result, the route serves the persisted copy, so a slow feature/model
+    computation never blocks a request.
+
+    Loads only `serving_limit` rows per resolution (a few thousand, enough
+    for the tail's features to be fully warmed up) -- NOT the much larger
+    `limit` training uses -- so a live tick stays fast regardless of how
+    much history PAXG has accumulated for actual model training.
+    """
+    now = dt.datetime.now(dt.timezone.utc)
+    resolutions_needed = {cfg["resolution"] for cfg in GOLD_HORIZONS.values()}
+    raw_candles: dict[str, pd.DataFrame] = {}
+    for resolution in resolutions_needed:
+        limit = max(cfg["serving_limit"] for cfg in GOLD_HORIZONS.values() if cfg["resolution"] == resolution)
+        candles = await load_candles_df(GOLD_SPOT_SYMBOL, resolution, limit=limit)
+        if len(candles) >= 30:
+            raw_candles[resolution] = candles
+
+    cross_asset = await crypto_correlation_context()
+    snapshot = await asyncio.to_thread(_build_gold_snapshot_sync, raw_candles, now)
+    snapshot["cross_asset"] = cross_asset
+    return snapshot

@@ -168,24 +168,20 @@ GOLD_FEATURE_COLUMNS: list[str] = [
 
 # Longest lookback actually used above (hurst_200) plus a safety margin, so
 # every feature has genuinely warmed up before a row is considered valid.
-# Fine for the short-term (1h) model, which has ~3000 rows of real history
-# to spare -- see GOLD_FEATURE_COLUMNS_LONG_TERM below for why the long-term
-# (1d) model can't afford this.
+# All 3 gold horizons use this (see train.py's GOLD_HORIZONS) now that the
+# long-term/1d model has ~2200 real daily rows of PAXG/USDT history to spare
+# -- see GOLD_FEATURE_COLUMNS_LONG_TERM below for the legacy reduced set
+# that was needed back when the daily source had only ~127 real rows.
 GOLD_WARMUP_BARS = 210
 
-# The long-term model trains on `.DEXAUTUSD` DAILY bars, and (checked live
-# against Delta's own history, 2026-08-21) only ~127 days of that history
-# exist at all -- nowhere near the 200+ rows the 100/200-bar-lookback
-# features above need to ever produce a single non-NaN reading. Rather than
-# silently training on zero rows (every one of them NaN on those columns),
-# the long-term model uses this deliberately SMALLER feature set (dropping
-# ma_z_100/200, hurst_100/200, and fib_position_100 -- whose longest
-# surviving lookback is 60 bars, not 200 or 100) and a correspondingly
-# smaller warmup. The astro_* features need no warmup at all (point-in-time
-# astronomical calculations, valid from row 0), so all of them stay in. This
-# is an honest capability gap, not a design preference: as more daily
-# history accumulates from here on, the full-size feature set becomes
-# viable and should replace this one.
+# LEGACY / fallback only -- no longer used by GOLD_HORIZONS (train.py) as of
+# the 2026-08-25 switch to PAXG/USDT, which gives the long-term/1d model
+# ~2200 real daily rows, comfortably past the 200+ the 100/200-bar-lookback
+# features above need. Kept as a real, tested capability for training on a
+# genuinely thin daily sample (dropping ma_z_100/200, hurst_100/200, and
+# fib_position_100 -- whose longest surviving lookback is 60 bars, not 200
+# or 100 -- and a correspondingly smaller warmup), in case the daily data
+# source ever regresses to something this thin again.
 GOLD_FEATURE_COLUMNS_LONG_TERM: list[str] = [
     c for c in GOLD_FEATURE_COLUMNS
     if c not in {"ma_z_100", "ma_z_200", "hurst_100", "hurst_200", "fib_position_100"}
@@ -334,11 +330,11 @@ def _autocorrelation(returns: pd.Series, lag: int, window: int = 50) -> pd.Serie
 
 def build_gold_feature_frame(candles: pd.DataFrame) -> pd.DataFrame:
     """Builds gold's own research feature bank from raw OHLCV candles (only
-    `time`/`open`/`high`/`low`/`close` are required -- the underlying
-    `.DEXAUTUSD` spot index carries no real trade volume, so nothing here
-    depends on it). Every column in GOLD_FEATURE_COLUMNS is computed here;
-    `build_gold_feature_frame(...)`'s LAST row is also what the live
-    /api/gold/snapshot endpoint reads for "current reading" display.
+    `time`/`open`/`high`/`low`/`close` are required -- PAXG/USDT's real
+    Binance volume is stored alongside these but nothing here depends on it
+    yet, unlike crypto's vwap). Every column in GOLD_FEATURE_COLUMNS is
+    computed here; `build_gold_feature_frame(...)`'s LAST row is also what
+    the live /api/gold/snapshot endpoint reads for "current reading" display.
     """
     out = candles.copy().reset_index(drop=True)
     close, high, low = out["close"], out["high"], out["low"]

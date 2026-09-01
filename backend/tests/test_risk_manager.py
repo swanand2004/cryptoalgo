@@ -1,3 +1,5 @@
+import datetime as dt
+
 import pytest
 
 from app.config import Settings
@@ -7,9 +9,13 @@ from app.risk.risk_manager import RiskManager
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(delta_api_key="k", delta_api_secret="s", max_daily_loss_usd=200, max_leverage=5)
+    base = dict(delta_api_key="k", delta_api_secret="s", daily_loss_limit_pct=0.10, max_leverage=5)
     base.update(overrides)
     return Settings(**base)
+
+
+def _today_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).date().isoformat()
 
 
 @pytest.mark.asyncio
@@ -34,7 +40,7 @@ async def test_daily_loss_breach_alone_does_not_auto_engage_kill_switch():
     while still respecting a deliberate manual re-enable afterward rather
     than fighting it every tick for as long as the breach persists.
     """
-    rm = RiskManager(_settings(max_daily_loss_usd=100))
+    rm = RiskManager(_settings(daily_loss_limit_pct=0.01))
     cache = MarketDataCache()
     cache.system_status = {"status": "live"}
 
@@ -42,7 +48,7 @@ async def test_daily_loss_breach_alone_does_not_auto_engage_kill_switch():
     await rm.trading_allowed(cache, equity=10_000)
 
     # Mark-to-market equity has now dropped 150 USD -- a real breach against
-    # the 100 USD limit -- but trading_allowed/evaluate_kill_switch alone
+    # the 1% (100 USD) limit -- but trading_allowed/evaluate_kill_switch alone
     # still don't flip the flag or block orders themselves.
     allowed, reason = await rm.trading_allowed(cache, equity=9_850)
     assert allowed
@@ -64,7 +70,7 @@ async def test_daily_loss_check_is_mark_to_market_not_realized_only():
     directly against the day's starting equity catches an still-open,
     still-losing position immediately, with zero realized trades at all.
     """
-    rm = RiskManager(_settings(max_daily_loss_usd=100))
+    rm = RiskManager(_settings(daily_loss_limit_pct=0.01))
 
     ok, _ = await rm.check_daily_loss(10_000)  # establishes starting_equity
     assert ok
@@ -119,13 +125,68 @@ async def test_daily_profit_target_and_daily_loss_share_the_same_starting_equity
     """Both checks anchor to the SAME DailyPnLTracker.starting_equity -- one
     "today" concept, two symmetric limits on it -- so whichever check runs
     first establishes it for both."""
-    rm = RiskManager(_settings(daily_profit_target_pct=0.10, max_daily_loss_usd=100))
+    rm = RiskManager(_settings(daily_profit_target_pct=0.10, daily_loss_limit_pct=0.01))
 
     await rm.check_daily_loss(10_000)  # establishes starting_equity via the OTHER check
 
     ok, reason = await rm.check_daily_profit_target(11_000)
     assert not ok
     assert "started 10000.00" in reason
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_status_is_none_when_switch_is_off():
+    rm = RiskManager(_settings())
+    assert await rm.kill_switch_status(10_000) is None
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_status_reports_profit_target_when_that_flag_is_set_today():
+    from app.data.app_state import set_kill_switch, set_state
+
+    rm = RiskManager(_settings())
+    await rm.check_daily_profit_target(10_000)  # establishes starting_equity via risk_manager's own tracker
+    today = _today_iso()
+    await set_state("daily_profit_target_auto_triggered_day", today)
+    await set_kill_switch(True)
+
+    status = await rm.kill_switch_status(11_000)
+
+    assert status["type"] == "profit_target"
+    assert status["pnl_usd"] == pytest.approx(1_000.0)
+    assert status["pnl_pct"] == pytest.approx(0.10)
+    assert "profit target" in status["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_status_reports_daily_loss_when_that_flag_is_set_today():
+    from app.data.app_state import set_kill_switch, set_state
+
+    rm = RiskManager(_settings())
+    await rm.check_daily_loss(10_000)
+    today = _today_iso()
+    await set_state("daily_kill_switch_auto_triggered_day", today)
+    await set_kill_switch(True)
+
+    status = await rm.kill_switch_status(9_000)
+
+    assert status["type"] == "daily_loss"
+    assert status["pnl_usd"] == pytest.approx(-1_000.0)
+    assert "loss limit" in status["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_status_falls_back_to_manual_when_neither_todays_flag_is_set():
+    from app.data.app_state import set_kill_switch
+
+    rm = RiskManager(_settings())
+    await rm.check_daily_loss(10_000)  # establishes starting_equity, no breach
+    await set_kill_switch(True)  # e.g. the dashboard button, not an auto-trigger
+
+    status = await rm.kill_switch_status(10_050)
+
+    assert status["type"] == "manual"
+    assert status["message"] == "Kill switch manually engaged."
 
 
 @pytest.mark.asyncio
@@ -291,18 +352,26 @@ def test_cap_position_size_leaves_room_for_several_concurrent_trades():
     assert cumulative_margin <= equity * 0.85 + 1e-6
 
 
-def test_default_margin_settings_support_eight_to_nine_concurrent_trades():
-    """Locks in the specific business requirement: with the DEFAULT
-    max_margin_per_trade_pct (0.10, not overridden here), the 85% aggregate
-    margin budget should support 8-9 concurrently open trades of similar
-    size (0.85 / 0.10 = 8.5), not the ~5-6 the older 0.15 default allowed.
+def test_default_margin_settings_support_four_concurrent_trades():
+    """Locks in the current business requirement: with the DEFAULT
+    max_margin_per_trade_pct (0.10, not overridden here), the 40% aggregate
+    margin budget should support 4 concurrently open trades of similar size
+    (0.40 / 0.10 = 4).
+
+    max_margin_utilization dropped from 0.85 to 0.40 on 2026-08-31 after
+    directly measuring the 3 live strategies' actual return correlation
+    (mean pairwise 0.733 across all 9 strategy/symbol combinations, not the
+    near-independence originally assumed) -- see config.py's comment on
+    max_margin_utilization for the full derivation. This is a real,
+    intentional reduction in how much aggregate risk the book is allowed to
+    carry, not a regression.
     """
     # max_portfolio_leverage deliberately NOT overridden -- this test exists
     # to lock in the real, default-settings behavior, including the fact
-    # that the portfolio notional cap had to rise alongside the margin cap
-    # (see config.py) so it doesn't silently become the binding constraint
-    # before margin does.
-    settings = _settings(max_leverage=50, max_margin_utilization=0.85)
+    # that the portfolio notional cap is sized to match the margin cap (see
+    # config.py) so it doesn't silently become the binding constraint before
+    # margin does.
+    settings = _settings(max_leverage=50, max_margin_utilization=0.40)
     rm = RiskManager(settings)
     equity = 10_000
     price = 50_000
@@ -313,7 +382,7 @@ def test_default_margin_settings_support_eight_to_nine_concurrent_trades():
     cumulative_notional = 0.0
     cumulative_margin = 0.0
     sizes: list[int] = []
-    for _ in range(9):
+    for _ in range(4):
         capped = rm.cap_position_size(
             proposed_contracts=1500,  # each strategy independently wants an aggressive notional
             symbol="BTCUSD",
@@ -327,9 +396,8 @@ def test_default_margin_settings_support_eight_to_nine_concurrent_trades():
         cumulative_notional += capped * notional_per_contract
         cumulative_margin += (capped * notional_per_contract) / leverage
 
-    # All 9 get a real, non-zero allocation (the first 8 full-sized, the 9th
-    # at least partial as the aggregate budget runs down) -- not the first
-    # one or two eating the whole budget.
+    # All 4 get a real, full-sized allocation -- not the first one or two
+    # eating the whole budget.
     assert all(s > 0 for s in sizes)
-    assert sum(1 for s in sizes if s == sizes[0]) >= 8
-    assert cumulative_margin <= equity * 0.85 + 1e-6
+    assert sum(1 for s in sizes if s == sizes[0]) >= 4
+    assert cumulative_margin <= equity * 0.40 + 1e-6

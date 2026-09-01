@@ -11,12 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from app.gold.features import (
-    GOLD_FEATURE_COLUMNS,
-    GOLD_FEATURE_COLUMNS_LONG_TERM,
-    GOLD_WARMUP_BARS,
-    GOLD_WARMUP_BARS_LONG_TERM,
-)
+from app.gold.features import GOLD_FEATURE_COLUMNS, GOLD_WARMUP_BARS
 from app.ml.dataset import make_forward_return_labels, purged_walk_forward_splits
 
 logger = logging.getLogger(__name__)
@@ -26,34 +21,49 @@ GOLD_MODEL_STORE_DIR = Path(__file__).resolve().parent / "model_store"
 # Two horizons, deliberately far apart -- "short term" and "long term" as
 # genuinely different questions, not the same target reused at a different
 # resolution (contrast with crypto's ML_RESOLUTIONS, which keeps one ~4h
-# target constant across resolutions). `.DEXAUTUSD`'s real available history
-# (checked live against Delta's own candles endpoint, 2026-08-21): ~3000
-# hourly bars (~126 days) and only ~127 daily bars -- both limits below sit
-# inside what's actually there.
+# target constant across resolutions).
 #
-# Honest limitation, not hidden: the long-term/1d model trains on roughly
-# 60 usable rows after its (smaller) warmup -- nowhere near enough for a
-# real 5-fold purged walk-forward (each fold needs ~20+ rows on its own), so
-# it uses n_splits=1 (a single train/holdout split) and a reduced feature
-# set (GOLD_FEATURE_COLUMNS_LONG_TERM -- see features.py) that doesn't need
-# a 100/200-bar warmup it can't afford. Report the numbers as-is rather than
-# smoothing over how little data backs them, and revisit (restore the full
-# feature set and 5-fold validation) once more daily history accumulates.
+# Data source switched from Delta's `.DEXAUTUSD` to PAXG/USDT via Binance on
+# 2026-08-25 (see app/gold/ingest.py's docstring for the full validation) --
+# real available history is now ~127k 15m bars (since 2023-01-01), ~52k
+# hourly bars, and ~2200 daily bars, vs the old source's ~127-150 days at
+# every resolution. Only INTRADAY's accuracy improvement was statistically
+# validated (holdout z=4.80); short_term/long_term switched for one
+# consistent price source across the page, not because their accuracy
+# improved -- it didn't, even with this much more data (z=0.68 and z=-0.22).
+# The limits below intentionally sit inside what PAXG actually has, with
+# headroom for it to keep growing daily.
+#
+# `limit` (training) vs `serving_limit` (live snapshot) are DELIBERATELY
+# different scales -- a real bug caught live (2026-08-25): engine.py's
+# per-tick snapshot used to load the same huge `limit` training uses, and
+# rebuilding the full feature bank (in particular hurst_exponent's O(rows x
+# window) rolling calculation) over 127k rows EVERY 3 minutes blocked the
+# single asyncio event loop for 30+ minutes solid -- freezing the entire
+# app, including crypto trading's own risk supervisors and HTTP routes, not
+# just gold. `serving_limit` only needs enough rows for the LAST row's
+# features to be fully warmed up (a few thousand, comfortably above
+# `warmup_bars`), since live serving only ever reads the tail; the full
+# `limit` is still used once a day by the retrain job, which now also runs
+# off the main event loop (see scheduler._gold_retrain/asyncio.to_thread).
 GOLD_HORIZONS: dict[str, dict] = {
-    # `.DEXAUTUSD` 15m history is shorter than 1h's (~4000 bars / ~42 days,
-    # checked live 2026-08-21 -- a narrower retention window at this finer
-    # granularity), but still comfortably covers the full feature set.
     "intraday": {
-        "resolution": "15m", "limit": 4000, "horizon_bars": 4,  # ~1 hour ahead
+        "resolution": "15m", "limit": 150_000, "serving_limit": 2_000, "horizon_bars": 4,  # ~1 hour ahead
         "feature_columns": GOLD_FEATURE_COLUMNS, "warmup_bars": GOLD_WARMUP_BARS, "n_splits": 5,
     },
     "short_term": {
-        "resolution": "1h", "limit": 3000, "horizon_bars": 24,  # ~1 day ahead
+        "resolution": "1h", "limit": 60_000, "serving_limit": 2_000, "horizon_bars": 24,  # ~1 day ahead
         "feature_columns": GOLD_FEATURE_COLUMNS, "warmup_bars": GOLD_WARMUP_BARS, "n_splits": 5,
     },
+    # Formerly a reduced feature set/warmup/single-split (GOLD_FEATURE_
+    # COLUMNS_LONG_TERM in features.py, still defined there for anyone
+    # training on a genuinely thin sample) -- PAXG's ~2200 real daily bars
+    # comfortably support the FULL feature set (210-bar warmup) and a real
+    # 5-fold purged walk-forward, so this now matches short_term/intraday
+    # exactly rather than needing a special case for thin data.
     "long_term": {
-        "resolution": "1d", "limit": 500, "horizon_bars": 5,  # ~1 week ahead
-        "feature_columns": GOLD_FEATURE_COLUMNS_LONG_TERM, "warmup_bars": GOLD_WARMUP_BARS_LONG_TERM, "n_splits": 1,
+        "resolution": "1d", "limit": 3_000, "serving_limit": 500, "horizon_bars": 5,  # ~1 week ahead
+        "feature_columns": GOLD_FEATURE_COLUMNS, "warmup_bars": GOLD_WARMUP_BARS, "n_splits": 5,
     },
 }
 
@@ -169,23 +179,22 @@ def train_and_save_gold(
     model_version: str | None = None,
 ) -> GoldTrainingReport:
     """Trains gold's dedicated LightGBM regressor for one horizon
-    ("short_term" or "long_term"), validated with the same purged walk-
-    forward discipline used for the crypto models -- but a fully separate
-    model/feature set/store directory, per explicit request that this be a
-    genuinely different system, not the crypto strategy reapplied to a new
-    symbol. Callers should pass the `feature_columns`/`warmup_bars`/
-    `n_splits` from GOLD_HORIZONS[horizon] rather than relying on the
-    (short-term-sized) defaults for every horizon -- see that dict's
-    docstring for why long_term needs smaller values of all three.
+    ("intraday", "short_term", or "long_term"), validated with the same
+    purged walk-forward discipline used for the crypto models -- but a
+    fully separate model/feature set/store directory, per explicit request
+    that this be a genuinely different system, not the crypto strategy
+    reapplied to a new symbol. Callers should pass the `feature_columns`/
+    `warmup_bars`/`n_splits` from GOLD_HORIZONS[horizon] rather than relying
+    on the defaults.
     """
     X, y = build_gold_training_frame(
         feature_df, horizon_bars=horizon_bars, warmup_bars=warmup_bars, feature_columns=feature_columns
     )
-    # 40, not the crypto pipeline's 200: gold's long-term/1d horizon has a
-    # genuinely tiny total history (see GOLD_HORIZONS' docstring) -- this
-    # floor is deliberately just enough to fit a single train/holdout split,
-    # not a real statistical comfort threshold. n=40-60 is a real, honestly-
-    # thin sample, not a bug.
+    # 40, not the crypto pipeline's 200: still supports training a REDUCED
+    # feature set (GOLD_FEATURE_COLUMNS_LONG_TERM in features.py) on a
+    # genuinely thin real sample if one is ever passed in directly -- not
+    # what GOLD_HORIZONS itself uses live any more (see its docstring), but
+    # a capability worth keeping for a data source that ever regresses.
     if len(X) < 40:
         raise ValueError(f"Not enough gold samples to train {horizon} ({len(X)}) -- need at least 40")
 

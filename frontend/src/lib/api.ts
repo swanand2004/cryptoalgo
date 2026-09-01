@@ -50,6 +50,15 @@ export interface OrderbookView {
   imbalance: number | null
 }
 
+export interface KillSwitchReason {
+  type: 'profit_target' | 'daily_loss' | 'manual' | 'max_drawdown'
+  message: string
+  pnl_usd: number
+  pnl_pct: number
+  starting_equity: number
+  equity: number
+}
+
 export interface Position {
   symbol: string
   size: number
@@ -149,6 +158,8 @@ export interface GoldPrediction {
   n_samples: number | null
   mean_directional_accuracy: number | null
   mean_information_coefficient: number | null
+  risk_level: 'low' | 'medium' | 'high' | 'very_high'
+  risk_reason: string
 }
 
 export interface GoldSeasonality {
@@ -210,7 +221,8 @@ export const api = {
   candles: (symbol: string, resolution = '15m', limit = 300) =>
     req<Candle[]>(`/market/${symbol}/candles?resolution=${resolution}&limit=${limit}`),
 
-  mode: () => req<{ mode: string; kill_switch: boolean }>('/trading/mode'),
+  mode: () =>
+    req<{ mode: string; kill_switch: boolean; kill_switch_reason: KillSwitchReason | null }>('/trading/mode'),
   setMode: (mode: 'paper' | 'live') =>
     req<{ mode: string }>('/trading/mode', { method: 'POST', body: JSON.stringify({ mode }) }),
   killSwitch: (on: boolean) =>

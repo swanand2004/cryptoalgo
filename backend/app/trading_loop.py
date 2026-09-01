@@ -40,10 +40,23 @@ FAVORABLE_RESOLUTION: dict[str, dict[str, str]] = {
         "graha": "4h",
         "tsmom": "4h",
     },
+    # ETH's trend_momentum/tsmom moved 1h -> 4h on 2026-08-31, after the
+    # backtest engine's intrabar-lookahead and free-stop-fill bugs were fixed
+    # (see [[project-backtest-engine-bugs]] -- every resolution choice in this
+    # table was originally made on the broken engine, so they were re-derived
+    # from scratch). 4h beats 1h essentially everywhere on the corrected
+    # engine: in-sample on 6 of 6 BTC/SOL combos, often hugely (BTC graha
+    # +9.5% at 4h vs -21.8% at 1h), and out-of-sample on these two ETH combos
+    # by a wide margin -- trend_momentum -5.13% -> +11.21% (Sharpe -0.80 ->
+    # 3.02) and tsmom -6.58% -> +14.34% (Sharpe -0.96 -> 2.89), each with
+    # roughly HALF the max drawdown. The mechanism is visible in the live
+    # trade data rather than assumed: 4h takes ~1/4 the trades (19 vs 72, 39
+    # vs 136), and real closed trades showed fees consuming 36-89% of gross
+    # profit, so quartering trade count is a direct, large cost saving.
     "ETHUSD": {
-        "trend_momentum": "1h",
-        "graha": "4h",  # after the deep Panchang rebuild, 4h beats 1h here too (Sharpe 2.64 vs 1.44)
-        "tsmom": "1h",
+        "trend_momentum": "4h",
+        "graha": "4h",  # after the deep Panchang rebuild, 4h beats 1h here too
+        "tsmom": "4h",
     },
     "SOLUSD": {
         "trend_momentum": "4h",

@@ -12,6 +12,18 @@ const NAV = [
   { to: '/gold', label: 'Gold' },
 ]
 
+// Locking in a hit profit target is good news, so it gets its own (emerald,
+// not red) treatment -- a genuine loss breach and a manual toggle both read
+// as neutral/cautionary "trading is halted" states instead.
+const BANNER_STYLE: Record<string, { wrap: string; icon: string }> = {
+  profit_target: { wrap: 'bg-emerald-950 text-emerald-300 border-emerald-900', icon: '🎯' },
+  daily_loss: { wrap: 'bg-red-950 text-red-300 border-red-900', icon: '⛔' },
+  manual: { wrap: 'bg-amber-950 text-amber-300 border-amber-900', icon: '✋' },
+  // Deliberately the loudest of the four: unlike the daily halts, this one
+  // spans days and does not clear on its own at the next day boundary.
+  max_drawdown: { wrap: 'bg-red-900 text-red-100 border-red-600', icon: '🛑' },
+}
+
 export function Header() {
   const qc = useQueryClient()
   const { snapshot, connected } = useDashboardSocket()
@@ -35,6 +47,9 @@ export function Header() {
 
   const mode = modeQuery.data?.mode ?? 'paper'
   const killSwitchOn = modeQuery.data?.kill_switch ?? false
+  const killSwitchReason = modeQuery.data?.kill_switch_reason ?? null
+
+  const banner = killSwitchOn && killSwitchReason ? BANNER_STYLE[killSwitchReason.type] : null
 
   return (
     <header className="border-b border-neutral-800 bg-neutral-950/80 backdrop-blur sticky top-0 z-10">
@@ -103,6 +118,16 @@ export function Header() {
           </button>
         </div>
       </div>
+      {killSwitchOn && killSwitchReason && banner && (
+        <div className={`text-xs px-4 py-1.5 border-t flex items-center gap-2 ${banner.wrap}`}>
+          <span>{banner.icon}</span>
+          <span className="font-medium">{killSwitchReason.message}</span>
+          <span className="font-mono opacity-80">
+            ({killSwitchReason.pnl_usd >= 0 ? '+' : ''}
+            {killSwitchReason.pnl_usd.toFixed(2)} USD, {(killSwitchReason.pnl_pct * 100).toFixed(1)}% today)
+          </span>
+        </div>
+      )}
       {error && <div className="bg-red-950 text-red-300 text-xs px-4 py-1.5 border-t border-red-900">{error}</div>}
     </header>
   )

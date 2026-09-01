@@ -14,7 +14,7 @@ from app.data.db import SessionLocal
 from app.data.market_cache import MarketDataCache
 from app.data.models import AppState, ClosedTrade, Fill, Order, Position
 from app.execution.broker_base import Broker, OrderRequest, OrderResult, PositionView
-from app.risk.position_sizing import required_margin, select_leverage
+from app.risk.position_sizing import required_margin, select_leverage, stop_and_target
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +136,9 @@ class PaperBroker(Broker):
 
     def _stop_and_target(self, direction: int, entry_price: float, atr: Optional[float]) -> tuple[Optional[float], Optional[float]]:
         """direction: +1 for long, -1 for short. Returns (stop_loss, take_profit)."""
-        if not atr or atr <= 0:
-            return None, None
-        stop = entry_price - direction * self.settings.atr_stop_multiple * atr
-        target = entry_price + direction * self.settings.atr_take_profit_multiple * atr
-        return stop, target
+        return stop_and_target(
+            direction, entry_price, atr, self.settings.atr_stop_multiple, self.settings.atr_take_profit_multiple
+        )
 
     async def _apply_fill(
         self,

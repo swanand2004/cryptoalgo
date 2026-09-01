@@ -127,24 +127,51 @@ def test_two_horizons_never_collide_in_the_same_model_store(tmp_path, monkeypatc
     assert (tmp_path / f"gold_long_term_{long_version}.txt").exists()
 
 
-def test_long_term_trains_on_realistically_thin_daily_history(tmp_path, monkeypatch):
-    """Regression test for a real bug caught manually (2026-08-21): with the
-    FULL feature set's 210-bar warmup, `.DEXAUTUSD`'s real ~127-day daily
-    history left ZERO usable training rows (100/200-bar-lookback features
-    like hurst_200/ma_z_200 can never be non-NaN with under 200 total rows).
-    GOLD_HORIZONS["long_term"] must use a reduced feature set/warmup/
-    n_splits that actually fits this little data.
+def test_long_term_now_uses_the_full_feature_set_at_realistic_paxg_scale(tmp_path, monkeypatch):
+    """long_term switched from Delta's `.DEXAUTUSD` (~127 real daily bars)
+    to PAXG/USDT via Binance (~2200 real daily bars) on 2026-08-25 -- see
+    app/gold/ingest.py's docstring. GOLD_HORIZONS["long_term"] now uses the
+    SAME full feature set/210-bar warmup/5-fold split as the other two
+    horizons (no more special-cased reduced set), which this realistically-
+    sized sample must train cleanly with a real (not degenerate) 5-fold
+    walk-forward.
     """
     import app.gold.train as train_mod
 
     monkeypatch.setattr(train_mod, "GOLD_MODEL_STORE_DIR", tmp_path)
 
-    candles = _synthetic_gold_candles(n=127, seed=19)  # matches real .DEXAUTUSD daily history depth
+    candles = _synthetic_gold_candles(n=2185, seed=19)  # matches PAXG/USDT's real daily history depth
     features = build_gold_feature_frame(candles)
     cfg = GOLD_HORIZONS["long_term"]
+    assert cfg["n_splits"] == 5
+    assert cfg["warmup_bars"] == 210
 
     report = train_and_save_gold(
         features, horizon="long_term", horizon_bars=cfg["horizon_bars"], resolution=cfg["resolution"],
         feature_columns=cfg["feature_columns"], warmup_bars=cfg["warmup_bars"], n_splits=cfg["n_splits"],
+    )
+    assert report.n_samples > 1900
+    assert len(report.fold_metrics) == 5
+
+
+def test_legacy_reduced_feature_set_still_works_on_a_genuinely_thin_sample(tmp_path, monkeypatch):
+    """GOLD_HORIZONS["long_term"] no longer uses this (see the test above),
+    but the reduced feature set/warmup (GOLD_FEATURE_COLUMNS_LONG_TERM /
+    GOLD_WARMUP_BARS_LONG_TERM in features.py) is kept as a real, working
+    capability for a daily data source that's genuinely this thin -- the
+    exact scenario that motivated it originally (Delta's `.DEXAUTUSD`, ~127
+    real daily bars, 2026-08-21).
+    """
+    import app.gold.train as train_mod
+    from app.gold.features import GOLD_FEATURE_COLUMNS_LONG_TERM, GOLD_WARMUP_BARS_LONG_TERM
+
+    monkeypatch.setattr(train_mod, "GOLD_MODEL_STORE_DIR", tmp_path)
+
+    candles = _synthetic_gold_candles(n=127, seed=19)
+    features = build_gold_feature_frame(candles)
+
+    report = train_and_save_gold(
+        features, horizon="long_term", horizon_bars=5, resolution="1d",
+        feature_columns=GOLD_FEATURE_COLUMNS_LONG_TERM, warmup_bars=GOLD_WARMUP_BARS_LONG_TERM, n_splits=1,
     )
     assert report.n_samples > 0

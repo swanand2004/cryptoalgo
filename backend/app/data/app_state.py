@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -38,3 +40,11 @@ async def is_kill_switch_on() -> bool:
 
 async def set_kill_switch(on: bool) -> None:
     await set_state("kill_switch", "on" if on else "off")
+    if on:
+        # Records the calendar day (UTC) the switch was most recently
+        # engaged -- whether by a daily breach auto-trigger or a manual
+        # toggle -- so scheduler._daily_kill_switch_reset can tell "engaged
+        # today" (leave it alone) apart from "engaged on some earlier day
+        # and never reset" (stale, should be cleared) without needing its
+        # own separate bookkeeping of when it last checked.
+        await set_state("kill_switch_engaged_day", dt.datetime.now(dt.timezone.utc).date().isoformat())

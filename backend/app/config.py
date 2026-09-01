@@ -54,22 +54,41 @@ class Settings(BaseSettings):
     max_leverage: float = 50.0
     # Equity-relative, not a fixed dollar figure -- so it scales automatically
     # as the account grows/shrinks instead of needing manual re-tuning.
-    # Raised alongside max_margin_per_trade_pct so MARGIN is what decides
-    # how many trades can be open at once, not this cap silently binding
-    # first: at max_leverage=50 and max_margin_per_trade_pct=0.10, 9 fully
-    # margin-capped trades need up to 9 * (equity*0.10*50) = 45x equity in
-    # aggregate notional even though their aggregate MARGIN is only the
-    # intended 90% of equity. 45x is the exact break-even for that; this is
-    # a real, substantial increase in the aggregate notional-exposure
-    # ceiling (not just margin) as a direct consequence of prioritizing the
-    # 8-9-concurrent-trades target.
-    max_portfolio_leverage: float = 45
+    # Sized to match max_margin_utilization's break-even point (see below):
+    # at max_leverage=50 and max_margin_per_trade_pct=0.10, the number of
+    # full-sized concurrent trades the margin cap allows is
+    # max_margin_utilization / max_margin_per_trade_pct = 4, so 4 * (equity *
+    # 0.10 * 50) = 20x equity in aggregate notional is the break-even --
+    # raised just enough that MARGIN decides how many trades can be open at
+    # once, not this notional cap silently binding first.
+    max_portfolio_leverage: float = 20
     # Fraction of equity allowed to be committed as MARGIN across every open
     # position combined (not notional -- actual margin, i.e. notional/leverage).
     # A real exchange rejects an order once required margin exceeds your
     # balance; this is that same check, with a buffer left for adverse moves
     # before liquidation rather than cutting it exactly at 100%.
-    max_margin_utilization: float = 0.85
+    #
+    # Was 0.85, sized purely off "how many trades do we want open at once,"
+    # with no account taken of how CORRELATED those trades' returns actually
+    # are -- an assumption never measured until now. Measured directly
+    # (2026-08-31, event-driven backtest of each of the 3 live strategies in
+    # isolation, per symbol, over the same real history): mean pairwise
+    # correlation across all 9 strategy/symbol combinations is 0.733 (BTC
+    # trend_momentum vs. graha alone: 0.955 -- they're barely different bets
+    # at all). Plugged into the standard equal-weight portfolio-volatility
+    # formula (sqrt(1/N + (N-1)/N * rho), N = max_concurrent_positions = 4)
+    # against the independence this cap implicitly assumed (rho = 0), the
+    # REALIZED portfolio volatility for the same aggregate margin
+    # utilization is ~1.98x what was intended -- this book was never as
+    # diversified as "N positions" made it look, so it was running roughly
+    # twice the risk 0.85 was actually meant to represent. 0.40 (0.85/1.98)
+    # restores the ORIGINALLY INTENDED portfolio-level risk, given what the
+    # correlation actually is rather than what it was assumed to be. See
+    # [[project-risk-controls]] for the full derivation and correlation
+    # matrix. Revisit if a genuinely uncorrelated strategy is ever added --
+    # this number is only valid for the current 3-strategy lineup's measured
+    # correlation, not a universal constant.
+    max_margin_utilization: float = 0.40
     # Fraction of equity committed as margin, EVERY trade -- not just a
     # ceiling anymore (per explicit request), the actual sizing target:
     # position_sizing.fixed_margin_contracts sizes every fresh entry to
@@ -77,30 +96,56 @@ class Settings(BaseSettings):
     # the signal's conviction selects (see select_leverage). risk_manager's
     # cap_position_size still separately enforces this as a ceiling too
     # (defense in depth), which on a fresh entry is a no-op since both derive
-    # from the same number and the same selected leverage. With 5 strategies
-    # x 3 symbols trading independently, 1/9th of equity per trade keeps room
-    # for 8-9 to run concurrently (0.85 / 0.10 = 8.5) instead of one eating
-    # the whole account's margin.
+    # from the same number and the same selected leverage. With 3 strategies
+    # x 3 symbols trading independently but measured at 0.733 mean pairwise
+    # correlation (see max_margin_utilization above) -- not the near-
+    # independence originally assumed -- 1/10th of equity per trade now
+    # allows 4 to run concurrently (0.40 / 0.10 = 4), matching
+    # max_concurrent_positions below exactly rather than the previous 8-9.
     max_margin_per_trade_pct: float = 0.10
     # Hard cap on how many positions may be open SIMULTANEOUSLY across the
     # whole account (every symbol, every strategy combined) -- a position
     # count limit, separate from and in addition to the margin/leverage caps
-    # above. With 7 strategies x 3 symbols each trading its own independent
-    # position, the margin caps alone still allow up to ~8-9 concurrent
-    # trades; this trims that down to a smaller, easier-to-reason-about
-    # number. Extending or flipping an EXISTING position never counts as a
-    # new one against this cap -- only genuinely opening from flat does, so
-    # this never blocks managing risk on positions already open.
-    max_concurrent_positions: int = 5
-    max_daily_loss_usd: float = 200
-    # Mirror of max_daily_loss_usd for the upside: once today's mark-to-market
+    # above. Was 5 (from back when the margin caps alone still allowed
+    # ~8-9 concurrent trades and this trimmed that down); now set to match
+    # the margin cap's own natural limit of 4 exactly (see
+    # max_margin_utilization's correlation-derivation comment above), so
+    # this is a consistent backstop rather than a looser, redundant one.
+    # Extending or flipping an EXISTING position never counts as a new one
+    # against this cap -- only genuinely opening from flat does, so this
+    # never blocks managing risk on positions already open.
+    max_concurrent_positions: int = 4
+    # Equity-relative, not a fixed dollar figure -- was a flat MAX_DAILY_LOSS_USD
+    # (200) until 2026-08-23, which meant the actual loss tolerance shrank as a
+    # fraction of equity every time the account grew (on a ~$6,700 account, $200
+    # is only ~3%, tripping the breaker at a third of the symmetric 10% profit
+    # target below). Switched to a percentage of the day's STARTING equity so
+    # the two circuit breakers stay genuinely symmetric at any account size.
+    daily_loss_limit_pct: float = 0.10
+    # Mirror of daily_loss_limit_pct for the upside: once today's mark-to-market
     # gain reaches this fraction of the day's STARTING equity, trading halts
     # and flattens for the rest of the day (see risk_manager.check_daily_
     # profit_target / scheduler._daily_profit_target_supervisor) -- locking in
-    # a good day instead of risking giving it back. A percentage rather than
-    # a fixed dollar figure (unlike the loss limit) because a profit TARGET is
-    # naturally expressed relative to what you started the day with.
+    # a good day instead of risking giving it back.
     daily_profit_target_pct: float = 0.10
+    # Peak-to-trough drawdown limit, measured against a PERSISTENT equity
+    # high-water mark rather than any single day's starting equity -- the one
+    # universal fund risk control this system lacked until 2026-08-31.
+    #
+    # The gap it closes, concretely: losing 9% a day for three consecutive
+    # days passes every daily check (each day individually under
+    # daily_loss_limit_pct) while the account is actually down 27% from its
+    # peak. Daily limits are blind to multi-day bleed by construction; this
+    # is the limit that sees it.
+    #
+    # Deliberately a MORE serious state than the daily breakers: it does NOT
+    # auto-clear at the next day boundary the way they do (see
+    # scheduler._daily_kill_switch_reset, which explicitly skips while a
+    # drawdown halt is active). It clears only on a deliberate manual
+    # kill-switch-off, which also re-bases the high-water mark to that
+    # moment's equity so an acknowledged drawdown doesn't instantly re-fire
+    # off the old peak.
+    max_drawdown_pct: float = 0.20
     paper_starting_balance_usd: float = 10000
     atr_stop_multiple: float = 2.0  # stop-loss distance, in ATRs, from entry
     atr_take_profit_multiple: float = 3.0  # take-profit distance, in ATRs (1.5:1 reward:risk)
@@ -111,12 +156,17 @@ class Settings(BaseSettings):
     # reverses can round-trip all the way back to breakeven or even a small
     # loss, because the stop only trails at a constant 2 ATRs behind the
     # peak regardless of how close to target price got.
-    atr_breakeven_trigger_multiple: float = 1.0
-    # Was 1.0 -- tightened so the trailing stop follows the peak a bit more
-    # closely (locks in more of a favorable move, a bit sooner) once
-    # triggered, without changing anything about the wide pre-trigger stop
-    # or when tightening starts.
-    atr_tightened_trail_multiple: float = 0.8  # trail distance, in ATRs, once triggered
+    # Was 1.0 -- lowered per explicit "make the trailing more aggressive"
+    # request so the breakeven floor + tightened trail engage at HALF the
+    # favorable move they used to (a smaller move now counts as "committed
+    # enough" to start protecting), not just a tighter trail once triggered.
+    atr_breakeven_trigger_multiple: float = 0.5
+    # Was 1.0, then 0.8 -- tightened again (same request as above) so the
+    # trailing stop hugs the peak noticeably closer once triggered, locking
+    # in more of a favorable move sooner at the cost of getting stopped out
+    # by ordinary pullbacks more often. Doesn't change the wide pre-trigger
+    # stop or when tightening starts (see atr_breakeven_trigger_multiple).
+    atr_tightened_trail_multiple: float = 0.4  # trail distance, in ATRs, once triggered
 
     @property
     def symbol_list(self) -> list[str]:

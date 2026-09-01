@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import get_runtime
 from app.core.time_utils import to_iso_utc
-from app.data.app_state import get_trading_mode, is_kill_switch_on, set_kill_switch, set_trading_mode
+from app.data.app_state import (
+    get_state,
+    get_trading_mode,
+    is_kill_switch_on,
+    set_kill_switch,
+    set_state,
+    set_trading_mode,
+)
 from app.data.query import load_closed_trades, load_equity_curve, load_fills, load_orders
 from app.risk.position_sizing import required_margin
 from app.runtime import Runtime
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
@@ -24,8 +34,13 @@ class KillSwitchUpdate(BaseModel):
 
 
 @router.get("/mode")
-async def get_mode():
-    return {"mode": await get_trading_mode(), "kill_switch": await is_kill_switch_on()}
+async def get_mode(runtime: Runtime = Depends(get_runtime)):
+    kill_switch = await is_kill_switch_on()
+    reason = None
+    if kill_switch:
+        equity = await runtime.order_manager.get_equity()
+        reason = await runtime.risk_manager.kill_switch_status(equity)
+    return {"mode": await get_trading_mode(), "kill_switch": kill_switch, "kill_switch_reason": reason}
 
 
 @router.get("/signals")
@@ -78,6 +93,19 @@ async def get_kill_switch():
 @router.post("/kill_switch")
 async def update_kill_switch(body: KillSwitchUpdate, runtime: Runtime = Depends(get_runtime)):
     await set_kill_switch(body.on)
+    if not body.on:
+        # Turning the switch off is the deliberate ACKNOWLEDGMENT that
+        # clears a max-drawdown halt (nothing else does -- see
+        # scheduler._drawdown_supervisor / _daily_kill_switch_reset). The
+        # high-water mark has to be re-based to current equity at the same
+        # moment: leaving the old peak in place would have the drawdown
+        # supervisor re-halt on its very next 15s tick, since equity is of
+        # course still just as far below that peak as it was a second ago.
+        if (await get_state("drawdown_halt_active")) == "on":
+            equity = await runtime.order_manager.get_equity()
+            await set_state("drawdown_halt_active", "off")
+            await set_state("equity_high_water_mark", str(equity))
+            logger.info("Max-drawdown halt acknowledged -- high-water mark re-based to %.2f", equity)
     if body.on:
         # Flatten whichever broker was ACTUALLY live when the switch was
         # hit, before flipping the mode to paper -- flatten_all() with no

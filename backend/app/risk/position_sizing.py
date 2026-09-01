@@ -101,6 +101,21 @@ def select_leverage(quality: float, min_leverage: float = 10.0, max_leverage: fl
     return float(max(min_leverage, min(max_leverage, round(raw))))
 
 
+def stop_and_target(
+    direction: int, entry_price: float, atr: float | None, stop_multiple: float, target_multiple: float
+) -> tuple[float | None, float | None]:
+    """direction: +1 for long, -1 for short. Returns (stop_loss, take_profit)
+    at fixed ATR multiples from entry. Shared by PaperBroker (simulated
+    fills) and LiveBroker (real Delta bracket orders) so both size the exact
+    same protective levels off the exact same signal-time ATR.
+    """
+    if not atr or atr <= 0:
+        return None, None
+    stop = entry_price - direction * stop_multiple * atr
+    target = entry_price + direction * target_multiple * atr
+    return stop, target
+
+
 def required_margin(notional: float, funds: float) -> float:
     """Defensive clamp: margin can never exceed the funds it's measured
     against, however it was computed upstream (e.g. notional / leverage).

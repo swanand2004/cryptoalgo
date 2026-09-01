@@ -56,8 +56,8 @@ async def evaluate_all_strategies(
     margin_per_trade_pct: float = 0.10,
     atr_stop_multiple: float = 2.0,
     atr_take_profit_multiple: float = 3.0,
-    atr_breakeven_trigger_multiple: float = 1.0,
-    atr_tightened_trail_multiple: float = 0.8,
+    atr_breakeven_trigger_multiple: float = 0.5,
+    atr_tightened_trail_multiple: float = 0.4,
 ) -> list[StrategyPerformance]:
     """Backtests each strategy in isolation (weight=1, no ensemble blending)
     across every configured symbol, using whatever historical data is already

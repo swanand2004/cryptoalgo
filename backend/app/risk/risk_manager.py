@@ -74,17 +74,27 @@ class RiskManager:
         fires. Realized-only would miss exactly the case a daily-loss
         circuit breaker exists for -- a bad day that's still open, not
         just one already booked.
+
+        Equity-relative (daily_loss_limit_pct of the day's STARTING equity),
+        symmetric with check_daily_profit_target below -- not a fixed dollar
+        figure, which would silently become a tighter and tighter fraction of
+        the account as it grows.
         """
         self.daily_pnl.roll_if_new_day(equity)
         if self.daily_pnl.starting_equity == 0.0:
             self.daily_pnl.starting_equity = equity
         await self._persist_daily_pnl_state()
+
+        if self.daily_pnl.starting_equity <= 0:
+            return True, ""  # nothing to take a percentage of yet
+
         total_pnl_today = equity - self.daily_pnl.starting_equity
-        if total_pnl_today <= -self.settings.max_daily_loss_usd:
+        limit_usd = self.daily_pnl.starting_equity * self.settings.daily_loss_limit_pct
+        if total_pnl_today <= -limit_usd:
             return False, (
                 f"Daily loss limit breached: equity {total_pnl_today:.2f} USD today "
                 f"(started {self.daily_pnl.starting_equity:.2f}, now {equity:.2f}) "
-                f"<= -{self.settings.max_daily_loss_usd:.2f} USD"
+                f"<= -{limit_usd:.2f} USD ({self.settings.daily_loss_limit_pct:.0%})"
             )
         return True, ""
 
@@ -112,6 +122,102 @@ class RiskManager:
                 f">= +{target_usd:.2f} USD ({self.settings.daily_profit_target_pct:.0%})"
             )
         return True, ""
+
+    async def check_max_drawdown(self, equity: float) -> tuple[bool, str]:
+        """Peak-to-trough drawdown against a PERSISTENT high-water mark --
+        the multi-day risk the daily breakers are blind to by construction
+        (three consecutive 9% down days each pass check_daily_loss while the
+        account is down 27% from its peak).
+
+        The high-water mark ratchets UP only: it's raised whenever equity
+        makes a new high and otherwise left alone, so a drawdown is always
+        measured from the real peak, not from wherever the last check
+        happened to run. Re-based to current equity only on a deliberate
+        manual acknowledgment (see routes_trading.update_kill_switch), never
+        automatically -- otherwise a halt would clear itself on any bounce,
+        which is exactly how a drawdown policy stops being a policy.
+        """
+        if equity <= 0:
+            return True, ""
+
+        raw_hwm = await get_state("equity_high_water_mark")
+        high_water_mark = float(raw_hwm) if raw_hwm else 0.0
+
+        if equity > high_water_mark:
+            await set_state("equity_high_water_mark", str(equity))
+            return True, ""
+
+        if high_water_mark <= 0:
+            return True, ""
+
+        drawdown_pct = (high_water_mark - equity) / high_water_mark
+        if drawdown_pct >= self.settings.max_drawdown_pct:
+            return False, (
+                f"Max drawdown breached: equity {equity:.2f} is {drawdown_pct:.1%} below the "
+                f"high-water mark of {high_water_mark:.2f} "
+                f"(limit {self.settings.max_drawdown_pct:.0%})"
+            )
+        return True, ""
+
+    async def kill_switch_status(self, equity: float) -> dict | None:
+        """Human-facing explanation of WHY the kill switch is currently on --
+        the dashboard shows this as a banner so an engaged switch is never a
+        mystery. Distinguishes the three ways it can end up on, in priority
+        order: today's own auto-triggered-day flags (set by
+        _daily_profit_target_supervisor / _daily_loss_supervisor in
+        scheduler.py) if either matches today, otherwise a manual toggle
+        (dashboard button, or any other engagement not caused by one of those
+        two breach checks today).
+        """
+        if not await is_kill_switch_on():
+            return None
+
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        starting = self.daily_pnl.starting_equity
+        pnl_usd = equity - starting if starting else 0.0
+        pnl_pct = (pnl_usd / starting) if starting else 0.0
+
+        # Checked FIRST and deliberately not day-scoped: a drawdown halt is
+        # the most serious state the switch can be in, and unlike the daily
+        # flags it persists across day boundaries until acknowledged.
+        if (await get_state("drawdown_halt_active")) == "on":
+            raw_hwm = await get_state("equity_high_water_mark")
+            hwm = float(raw_hwm) if raw_hwm else 0.0
+            dd = (hwm - equity) / hwm if hwm > 0 else 0.0
+            return {
+                "type": "max_drawdown",
+                "message": (
+                    f"Max drawdown halt: {dd:.1%} below the high-water mark of ${hwm:,.2f} "
+                    f"(limit {self.settings.max_drawdown_pct:.0%}). This does NOT clear at the "
+                    "next day -- turning the kill switch off acknowledges it and re-bases the peak."
+                ),
+                "pnl_usd": pnl_usd,
+                "pnl_pct": pnl_pct,
+                "starting_equity": starting,
+                "equity": equity,
+            }
+
+        if await get_state("daily_profit_target_auto_triggered_day") == today:
+            kind = "profit_target"
+            message = (
+                f"Daily profit target reached (+{pnl_pct:.1%}) -- trading halted "
+                "for the rest of today to lock in the gain."
+            )
+        elif await get_state("daily_kill_switch_auto_triggered_day") == today:
+            kind = "daily_loss"
+            message = f"Daily loss limit reached ({pnl_pct:.1%}) -- trading halted for the rest of today."
+        else:
+            kind = "manual"
+            message = "Kill switch manually engaged."
+
+        return {
+            "type": kind,
+            "message": message,
+            "pnl_usd": pnl_usd,
+            "pnl_pct": pnl_pct,
+            "starting_equity": starting,
+            "equity": equity,
+        }
 
     async def record_realized_pnl(self, pnl: float) -> None:
         self.daily_pnl.add_realized(pnl)

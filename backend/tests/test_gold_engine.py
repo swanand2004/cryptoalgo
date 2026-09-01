@@ -3,7 +3,7 @@ import pytest
 
 from app.data.db import SessionLocal
 from app.data.models import Candle
-from app.gold.engine import GOLD_SPOT_SYMBOL, build_gold_snapshot, load_gold_snapshot, save_gold_snapshot
+from app.gold.engine import GOLD_SPOT_SYMBOL, _risk_level, build_gold_snapshot, load_gold_snapshot, save_gold_snapshot
 from app.gold.features import GOLD_FEATURE_COLUMNS
 
 
@@ -88,6 +88,123 @@ async def test_snapshot_predictions_report_all_horizons_even_when_untrained(tmp_
         assert entry["action"] == "HOLD"  # untrained -> no call, never crashes
         assert entry["target_price"] is None
         assert entry["valid_until"] is not None
+        assert entry["risk_level"] == "very_high"
+        assert "no validated track record" in entry["risk_reason"]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_loads_the_small_serving_limit_not_the_full_training_limit(monkeypatch):
+    """Regression test for a real incident (2026-08-25): build_gold_snapshot
+    used to load GOLD_HORIZONS' TRAINING `limit` (up to 150,000 rows for
+    intraday) on every 3-minute scheduler tick, and rebuilding the full
+    feature bank (in particular hurst_exponent's O(rows x window) rolling
+    calculation) at that scale blocked the single asyncio event loop for
+    30+ minutes -- freezing the entire app, not just gold. Live serving must
+    request each resolution's much smaller `serving_limit` instead.
+    """
+    import app.gold.engine as engine_mod
+    from app.gold.train import GOLD_HORIZONS
+
+    seen_limits: dict[str, int] = {}
+    real_load = engine_mod.load_candles_df
+
+    async def _spy_load(symbol, resolution, limit=500):
+        seen_limits[resolution] = limit
+        return await real_load(symbol, resolution, limit=limit)
+
+    monkeypatch.setattr(engine_mod, "load_candles_df", _spy_load)
+
+    await _seed_gold_candles("15m", n=50)
+    await _seed_gold_candles("1h", n=50)
+    await _seed_gold_candles("1d", n=50)
+
+    await build_gold_snapshot()
+
+    for cfg in GOLD_HORIZONS.values():
+        assert seen_limits[cfg["resolution"]] == cfg["serving_limit"]
+        assert seen_limits[cfg["resolution"]] < cfg["limit"]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_predicts_on_only_the_tail_row_not_the_full_frame(tmp_path, monkeypatch):
+    """Regression test, same incident as the serving_limit test above:
+    predict_score_batch used to run across the ENTIRE feature frame even
+    though only its LAST value was ever used -- pure wasted computation that
+    got dramatically worse once PAXG's history made frames far larger.
+    """
+    import app.gold.engine as engine_mod
+    import app.gold.predict as predict_mod
+    import app.gold.train as train_mod
+    from app.gold.features import build_gold_feature_frame
+    from app.gold.predict import GoldPredictor
+    from app.gold.train import GOLD_HORIZONS, train_and_save_gold
+
+    monkeypatch.setattr(train_mod, "GOLD_MODEL_STORE_DIR", tmp_path)
+    monkeypatch.setattr(predict_mod, "GOLD_MODEL_STORE_DIR", tmp_path)
+    monkeypatch.setattr(engine_mod, "GOLD_MODEL_STORE_DIR", tmp_path)
+
+    await _seed_gold_candles("15m", n=1000)
+    await _seed_gold_candles("1h", n=1000)
+    await _seed_gold_candles("1d", n=200)
+
+    from app.data.query import load_candles_df
+
+    cfg = GOLD_HORIZONS["intraday"]
+    candles = await load_candles_df(GOLD_SPOT_SYMBOL, "15m", limit=1000)
+    features = build_gold_feature_frame(candles)
+    train_and_save_gold(
+        features, horizon="intraday", horizon_bars=cfg["horizon_bars"], resolution=cfg["resolution"],
+        feature_columns=cfg["feature_columns"], warmup_bars=cfg["warmup_bars"], n_splits=1,
+    )
+
+    seen_lengths: list[int] = []
+    real_predict = GoldPredictor.predict_score_batch
+
+    def _spy_predict(self, feature_df, require_confidence=True):
+        seen_lengths.append(len(feature_df))
+        return real_predict(self, feature_df, require_confidence=require_confidence)
+
+    monkeypatch.setattr(GoldPredictor, "predict_score_batch", _spy_predict)
+
+    await build_gold_snapshot()
+
+    assert seen_lengths, "predict_score_batch was never called"
+    assert all(n == 1 for n in seen_lengths)
+
+
+def test_risk_level_no_track_record_is_very_high():
+    level, reason = _risk_level(None, None)
+    assert level == "very_high"
+    assert "no validated track record" in reason
+
+
+def test_risk_level_thin_sample_is_very_high_even_with_good_accuracy():
+    """A high accuracy number means little from a handful of samples --
+    matches long_term's genuinely thin (n~58) real-world sample."""
+    level, reason = _risk_level(0.70, 58)
+    assert level == "very_high"
+    assert "58" in reason
+
+
+def test_risk_level_at_or_below_coin_flip_is_very_high():
+    level, reason = _risk_level(0.48, 2766)
+    assert level == "very_high"
+    assert "coin flip" in reason
+
+
+def test_risk_level_slight_edge_is_high():
+    level, _ = _risk_level(0.517, 3786)
+    assert level == "high"
+
+
+def test_risk_level_modest_edge_is_medium():
+    level, _ = _risk_level(0.54, 1000)
+    assert level == "medium"
+
+
+def test_risk_level_strong_edge_is_low():
+    level, _ = _risk_level(0.60, 1000)
+    assert level == "low"
 
 
 def test_snapshot_save_and_load_round_trip(tmp_path, monkeypatch):

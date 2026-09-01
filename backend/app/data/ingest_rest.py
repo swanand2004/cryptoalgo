@@ -31,6 +31,18 @@ _RESOLUTION_SECONDS = {
 }
 
 
+# SQLite caps the total number of bound "?" parameters in a single
+# statement (~32766 on modern builds, as low as 999 on older ones) -- a
+# multi-row VALUES insert binds (columns x rows) of them at once. Existing
+# callers stayed under this by accident (Delta's own REST API caps a single
+# candles response to MAX_CANDLES_PER_REQUEST=2000, so upsert_candles was
+# always called with a small page at a time) until gold's PAXG/Binance
+# backfill handed it a single ~128k-row batch and hit "too many SQL
+# variables". Chunking here, not at every call site, fixes it for any future
+# caller with a large batch too.
+_UPSERT_CHUNK_SIZE = 500
+
+
 async def upsert_candles(symbol: str, resolution: str, candles: list[dict]) -> int:
     if not candles:
         return 0
@@ -48,18 +60,20 @@ async def upsert_candles(symbol: str, resolution: str, candles: list[dict]) -> i
         for c in candles
     ]
     async with SessionLocal() as session:
-        stmt = sqlite_insert(Candle).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["symbol", "resolution", "time"],
-            set_={
-                "open": stmt.excluded.open,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "close": stmt.excluded.close,
-                "volume": stmt.excluded.volume,
-            },
-        )
-        await session.execute(stmt)
+        for start in range(0, len(rows), _UPSERT_CHUNK_SIZE):
+            chunk = rows[start : start + _UPSERT_CHUNK_SIZE]
+            stmt = sqlite_insert(Candle).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["symbol", "resolution", "time"],
+                set_={
+                    "open": stmt.excluded.open,
+                    "high": stmt.excluded.high,
+                    "low": stmt.excluded.low,
+                    "close": stmt.excluded.close,
+                    "volume": stmt.excluded.volume,
+                },
+            )
+            await session.execute(stmt)
         await session.commit()
     return len(rows)
 

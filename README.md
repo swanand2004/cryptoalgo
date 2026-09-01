@@ -77,7 +77,8 @@ limit enforcement, the backtest engine, and the ML walk-forward pipeline.
   `DELTA_API_KEY`/`DELTA_API_SECRET` aren't configured.
 - The kill switch (dashboard header) immediately flattens all positions,
   forces paper mode, and halts trading. It also trips automatically if the
-  configured daily loss limit (`MAX_DAILY_LOSS_USD` in `.env`) is breached.
+  configured daily loss limit (`DAILY_LOSS_LIMIT_PCT` in `.env`, a fraction of
+  the day's starting equity) is breached.
 - Before ever pointing this at production with real funds, run it against
   Delta's **testnet** (`DELTA_ENV=testnet`, get a Demo account key from
   https://demo.delta.exchange) in live mode first to confirm order placement

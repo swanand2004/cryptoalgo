@@ -34,7 +34,7 @@ class Runtime:
         self.cache: MarketDataCache = get_market_cache()
         self.risk_manager = RiskManager(settings)
         self.paper_broker = PaperBroker(self.registry, self.cache, settings)
-        self.live_broker = LiveBroker(self.rest_client, self.registry, self.cache, self.risk_manager)
+        self.live_broker = LiveBroker(self.rest_client, self.registry, self.cache, self.risk_manager, settings)
         self.order_manager = OrderManager(
             self.paper_broker, self.live_broker, self.risk_manager, self.registry, self.cache
         )

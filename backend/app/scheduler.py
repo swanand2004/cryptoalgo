@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 
@@ -72,6 +73,14 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
     scheduler.add_job(
         _daily_profit_target_supervisor, "interval", seconds=15, args=[runtime],
         id="daily_profit_target_supervisor", max_instances=1, next_run_time=now,
+    )
+    scheduler.add_job(
+        _drawdown_supervisor, "interval", seconds=15, args=[runtime],
+        id="drawdown_supervisor", max_instances=1, next_run_time=now,
+    )
+    scheduler.add_job(
+        _daily_kill_switch_reset, "interval", seconds=60,
+        id="daily_kill_switch_reset", max_instances=1, next_run_time=now,
     )
     # Runs once daily at 03:00 UTC (off-peak). Models were manually retrained
     # 2026-08-19 after fixing the spot-index/funding-window feature bugs (see
@@ -230,7 +239,7 @@ async def _live_sync(runtime) -> None:
 async def _daily_loss_supervisor(runtime) -> None:
     """Proactively (not just reactively on the next order submission)
     auto-engages the kill switch the FIRST time today's mark-to-market
-    equity breaches max_daily_loss_usd -- flattening every open position
+    equity breaches daily_loss_limit_pct -- flattening every open position
     and forcing paper mode, exactly like the manual kill-switch toggle
     (routes_trading.py's update_kill_switch). This is what makes the daily
     loss limit an actual circuit breaker instead of just a log line:
@@ -310,6 +319,88 @@ async def _daily_profit_target_supervisor(runtime) -> None:
         await set_state("daily_profit_target_auto_triggered_day", today)
 
 
+async def _drawdown_supervisor(runtime) -> None:
+    """The multi-day risk control the daily supervisors structurally cannot
+    provide: halts trading when equity falls settings.max_drawdown_pct below
+    its persistent high-water mark, regardless of how any individual day
+    looked. Three consecutive 9% down days breach nothing daily while taking
+    the account 27% off its peak -- this is the check that sees that.
+
+    Unlike the daily supervisors it uses NO once-per-day flag, because a
+    drawdown isn't a daily event: instead it sets a persistent
+    `drawdown_halt_active` flag that _daily_kill_switch_reset explicitly
+    refuses to clear, so the halt survives day boundaries. That flag is
+    cleared only by a deliberate manual kill-switch-off (see
+    routes_trading.update_kill_switch), which also re-bases the high-water
+    mark -- without that re-basing, acknowledging the halt would re-trigger
+    it on the very next tick, since the old peak is still just as far above
+    current equity as it was a moment ago.
+    """
+    if await is_kill_switch_on():
+        return
+
+    equity = await runtime.order_manager.get_equity()
+    ok, reason = await runtime.risk_manager.check_max_drawdown(equity)
+    if ok:
+        return
+
+    logger.warning("Max drawdown breached -- auto-engaging kill switch: %s", reason)
+    try:
+        mode_to_flatten = await get_trading_mode()
+        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten)
+        await set_kill_switch(True)
+        await set_trading_mode("paper")
+    finally:
+        # Set even if flattening raised partway through: a halt that failed
+        # to fully flatten is MORE reason to stay halted, not less.
+        await set_state("drawdown_halt_active", "on")
+
+
+async def _daily_kill_switch_reset() -> None:
+    """Resets the kill switch to OFF once the calendar day (UTC) it was
+    engaged on is no longer today -- the loss/profit limits it protects are
+    DAILY by definition, so a halt from a previous day (whether the daily
+    supervisors auto-engaged it, or a human engaged it manually) must never
+    silently carry over and block trading on a fresh day that hasn't
+    breached anything itself yet.
+
+    Keyed off `kill_switch_engaged_day` (stamped by app_state.set_kill_switch
+    itself, every time the switch is turned ON -- see its docstring), NOT
+    this job's own "have I checked before" bookkeeping: a first-run-only
+    guard would (and initially did, see 2026-08-23 regression below) miss a
+    switch that was ALREADY stale from a previous day the very first time
+    this job ever runs, since it would have no prior state of its own to
+    compare against and would wrongly assume "nothing to roll over."
+    Comparing directly against WHEN THE SWITCH ITSELF was engaged has no
+    such blind spot: a None/older `kill_switch_engaged_day` is unambiguously
+    not-today regardless of whether this job has ever run before.
+
+    Deliberately does NOT touch daily_kill_switch_auto_triggered_day /
+    daily_profit_target_auto_triggered_day -- those already self-invalidate
+    once "today" no longer matches the stored date, so the two daily
+    supervisors are free to trigger fresh on the new day without any help
+    from this job.
+
+    Also deliberately does NOT clear a MAX-DRAWDOWN halt (see
+    _drawdown_supervisor): that limit is peak-to-trough across days, not
+    daily, so a new calendar day is not evidence the drawdown has recovered
+    -- auto-clearing it here would quietly turn the one multi-day risk
+    control in the system back into a daily one, which is precisely the hole
+    it was added to close.
+    """
+    if not await is_kill_switch_on():
+        return
+
+    if (await get_state("drawdown_halt_active")) == "on":
+        return
+
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    engaged_day = await get_state("kill_switch_engaged_day")
+    if engaged_day != today:
+        logger.info("Kill switch has been on since %s (not today, %s) -- resetting to OFF", engaged_day, today)
+        await set_kill_switch(False)
+
+
 async def _retrain_models(runtime) -> None:
     from app.data.query import load_candles_df, load_pseudo_series_df
     from app.features.feature_pipeline import build_feature_frame
@@ -355,38 +446,51 @@ async def _retrain_models(runtime) -> None:
 
 
 async def _gold_research_tick(runtime) -> None:
-    """Gold's own continuous research loop: refresh `.DEXAUTUSD` candles,
-    recompute the full parameter bank + both horizon predictions, and
+    """Gold's own continuous research loop: refresh PAXG/USDT candles,
+    recompute the full parameter bank + all horizon predictions, and
     persist the result for the API route to serve instantly. Entirely
     independent of trading -- no PaperBroker position, no PnL, no risk
     manager involvement -- per explicit request that this be a pure
     prediction/research page.
     """
     try:
-        await gold_incremental_backfill(runtime.rest_client)
+        await gold_incremental_backfill()
         snapshot = await build_gold_snapshot()
         save_gold_snapshot(snapshot)
     except Exception:
         logger.exception("Gold research tick failed")
 
 
+def _train_gold_horizon_sync(candles, horizon: str, cfg: dict):
+    """The CPU-heavy half of a gold retrain (feature computation + LightGBM
+    training) -- called via asyncio.to_thread by _gold_retrain below, never
+    awaited directly on the main event loop. Same reasoning as engine.py's
+    _build_gold_snapshot_sync: PAXG's much deeper history (up to ~128k rows
+    for intraday) makes this take real time now, and running it inline on
+    the event loop would freeze the entire app, not just gold, for however
+    long it takes.
+    """
+    from app.gold.features import build_gold_feature_frame
+    from app.gold.train import train_and_save_gold
+
+    features = build_gold_feature_frame(candles)
+    return train_and_save_gold(
+        features, horizon=horizon, horizon_bars=cfg["horizon_bars"], resolution=cfg["resolution"],
+        feature_columns=cfg["feature_columns"], warmup_bars=cfg["warmup_bars"], n_splits=cfg["n_splits"],
+    )
+
+
 async def _gold_retrain(runtime) -> None:
     from app.data.query import load_candles_df
-    from app.gold.features import build_gold_feature_frame
-    from app.gold.train import GOLD_HORIZONS, train_and_save_gold
+    from app.gold.ingest import GOLD_SPOT_SYMBOL
+    from app.gold.train import GOLD_HORIZONS
 
     for horizon, cfg in GOLD_HORIZONS.items():
         try:
-            from app.gold.ingest import GOLD_SPOT_SYMBOL
-
             candles = await load_candles_df(GOLD_SPOT_SYMBOL, cfg["resolution"], limit=cfg["limit"])
             if len(candles) < 90:
                 logger.info("Skipping gold %s retrain: only %d candles", horizon, len(candles))
                 continue
-            features = build_gold_feature_frame(candles)
-            train_and_save_gold(
-                features, horizon=horizon, horizon_bars=cfg["horizon_bars"], resolution=cfg["resolution"],
-                feature_columns=cfg["feature_columns"], warmup_bars=cfg["warmup_bars"], n_splits=cfg["n_splits"],
-            )
+            await asyncio.to_thread(_train_gold_horizon_sync, candles, horizon, cfg)
         except Exception:
             logger.exception("Gold retrain failed for %s", horizon)

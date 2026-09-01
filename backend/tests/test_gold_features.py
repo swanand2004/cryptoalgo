@@ -93,8 +93,8 @@ def test_cyclical_seasonality_encodings_stay_within_unit_circle_bounds():
 
 
 def test_no_volume_column_required():
-    """The `.DEXAUTUSD` spot index carries no real trade volume -- the
-    feature bank must not depend on it at all (unlike crypto's vwap)."""
+    """The feature bank must not depend on a volume column at all (unlike
+    crypto's vwap) -- some gold data sources carry no real trade volume."""
     candles = _synthetic_gold_candles(n=300)
     assert "volume" not in candles.columns
     features = build_gold_feature_frame(candles)  # must not raise KeyError

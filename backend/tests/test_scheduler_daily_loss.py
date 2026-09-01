@@ -39,7 +39,7 @@ class _FakeRuntime:
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(delta_api_key="k", delta_api_secret="s", max_daily_loss_usd=100)
+    base = dict(delta_api_key="k", delta_api_secret="s", daily_loss_limit_pct=0.01)
     base.update(overrides)
     return Settings(**base)
 
@@ -70,7 +70,7 @@ async def test_breach_auto_engages_kill_switch_and_flattens():
     assert not await is_kill_switch_on()
 
     # Price craters -- a real mark-to-market loss on the still-open position,
-    # well past the 100 USD daily limit, with zero trades ever closed.
+    # well past the 1% daily limit, with zero trades ever closed.
     runtime.cache.update_orderbook("TESTUSD", bids=[[899.0, 100]], asks=[[901.0, 100]], timestamp=2)
 
     await _daily_loss_supervisor(runtime)

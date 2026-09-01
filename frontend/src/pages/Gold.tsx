@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query'
 import { api, type GoldPrediction } from '../lib/api'
 import { signalTier } from '../lib/signalTier'
 import { CandleChart } from '../components/CandleChart'
-import { formatISTShort } from '../lib/time'
 
 const REGIME_LABEL: Record<string, { label: string; className: string }> = {
   trending: { label: 'Trending', className: 'bg-emerald-950 text-emerald-400 border border-emerald-900' },
@@ -28,6 +27,18 @@ const ACTION_STYLE: Record<string, string> = {
   BUY: 'bg-emerald-600 text-emerald-50',
   SELL: 'bg-red-600 text-red-50',
   HOLD: 'bg-neutral-800 text-neutral-400',
+}
+
+// Risk is the model's own honest walk-forward track record for this
+// horizon, not a generic disclaimer -- see backend/app/gold/engine.py's
+// _risk_level. "very_high" covers both "below coin-flip" and "too little
+// data to trust," which is deliberately where gold's short_term/long_term
+// horizons currently sit.
+const RISK_STYLE: Record<string, { label: string; className: string }> = {
+  low: { label: 'Low risk', className: 'bg-emerald-950 text-emerald-400 border border-emerald-900' },
+  medium: { label: 'Medium risk', className: 'bg-amber-950 text-amber-400 border border-amber-900' },
+  high: { label: 'High risk', className: 'bg-orange-950 text-orange-400 border border-orange-900' },
+  very_high: { label: 'Very high risk', className: 'bg-red-950 text-red-400 border border-red-900' },
 }
 
 const DEEP_STAGES: {
@@ -261,12 +272,9 @@ function PredictionCard({
   const hasScore = prediction && prediction.score !== null
   const tier = hasScore ? signalTier(prediction!.score as number) : null
   const accuracy = prediction?.mean_directional_accuracy ?? null
-  // Below coin-flip (50%) on the model's OWN honest walk-forward validation
-  // -- shown plainly rather than hidden, especially relevant for the
-  // long-term/1d model's genuinely thin (~50-60 row) sample right now.
-  const lowAccuracy = accuracy != null && accuracy < 0.5
   const action = prediction?.action ?? 'HOLD'
   const confirmation = cryptoConfirmation(action, crossAsset)
+  const risk = RISK_STYLE[prediction?.risk_level ?? 'very_high']
 
   return (
     <div className="rounded-md border border-neutral-800 p-4 flex flex-col gap-3">
@@ -278,6 +286,11 @@ function PredictionCard({
         <span className={`shrink-0 px-2.5 py-1 rounded-md text-xs font-bold tracking-wide ${ACTION_STYLE[action]}`}>
           {action}
         </span>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${risk.className}`}>{risk.label}</span>
+        {prediction?.risk_reason && <span className="text-[11px] text-neutral-600">{prediction.risk_reason}</span>}
       </div>
 
       {!hasScore && <div className="text-neutral-700 font-mono text-sm">no model trained yet</div>}
@@ -333,10 +346,9 @@ function PredictionCard({
             <div className="text-[11px] text-neutral-600 italic">abstaining -- not confident enough to call</div>
           )}
           {accuracy != null && (
-            <div className={`text-[11px] ${lowAccuracy ? 'text-red-400' : 'text-neutral-600'}`}>
+            <div className="text-[11px] text-neutral-600">
               walk-forward accuracy: {(accuracy * 100).toFixed(1)}%
               {prediction?.n_samples != null && ` (n=${prediction.n_samples})`}
-              {lowAccuracy && ' -- below coin-flip, treat skeptically'}
             </div>
           )}
         </>
@@ -465,7 +477,7 @@ export default function Gold() {
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
               </span>
               <div className="text-sm font-medium text-neutral-200">Gold Research Engine</div>
-              <span className="text-[10px] text-neutral-600 uppercase tracking-wider">XAUT / Tether Gold</span>
+              <span className="text-[10px] text-neutral-600 uppercase tracking-wider">PAXG / Paxos Gold</span>
             </div>
             <div className="text-xs text-neutral-600 mt-1 max-w-xl">
               Standalone research page -- NOT paper-traded, no positions or PnL. A dedicated feature bank (technicals,
