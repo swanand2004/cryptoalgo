@@ -50,12 +50,25 @@ def test_fear_greed_scaled_to_minus_one_to_one():
 
 
 def test_funding_spread_is_delta_minus_binance():
+    """Updated 2026-09-02. This test previously asserted 0.0010 - 0.0004 =
+    0.0006, which encoded TWO bugs it was silently protecting:
+
+      1. The `funding` argument is Delta's FUNDING: series, which carries the
+         PREMIUM INDEX, not the funding rate. Delta's real funding is derived
+         from it: funding = premium + clamp(0.01 - premium, -0.05, +0.05).
+         A premium of 0.0010% sits inside the clamp band, so funding = 0.01%.
+      2. ccxt reports Binance funding as a FRACTION while Delta's is a
+         PERCENT, so subtracting them raw was a 100x mismatch. 0.0004 as a
+         fraction is 0.04%.
+
+    Correct spread: 0.01% (Delta) - 0.04% (Binance) = -0.03%.
+    """
     df = build_feature_frame(
         _candles(),
         funding=_series([0.0010] * N),
         binance_funding=_series([0.0004] * N),
     )
-    assert df["funding_spread"].iloc[-1] == pytest.approx(0.0006)
+    assert df["funding_spread"].iloc[-1] == pytest.approx(-0.03)
 
 
 def test_binance_oi_change_is_relative_not_absolute():

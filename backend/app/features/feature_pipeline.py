@@ -23,7 +23,13 @@ from app.astro.panchang import (
     yoga_severity,
 )
 from app.features.calendar_events import weekly_expiry_proximity
-from app.features.funding import basis, funding_z_score, infer_bars_per_hour
+from app.features.funding import (
+    average_premium_pct,
+    basis,
+    funding_rate_from_premium,
+    funding_z_score,
+    infer_bars_per_hour,
+)
 from app.features.indicators import add_all_indicators
 
 
@@ -90,13 +96,33 @@ def build_feature_frame(
     bars_per_hour = infer_bars_per_hour(df["time"])
     funding_window = max(2, round(168 * bars_per_hour))
 
+    # The `funding` frame is Delta's FUNDING:{symbol} candle series, which --
+    # despite the name -- carries the PREMIUM INDEX ((mark - index) / index, in
+    # percent), NOT the funding rate. Verified 2026-09-02 against the live API:
+    # the series read -0.0447 while the live basis was -0.0431% and Delta's own
+    # ticker reported funding of +0.01%. It is named honestly here and the real
+    # funding rate is derived from it with Delta's published formula.
     if funding is not None and not funding.empty:
-        f = funding.sort_values("time")[["time", "value"]].rename(columns={"value": "funding_rate"})
+        f = funding.sort_values("time")[["time", "value"]].rename(columns={"value": "premium_index"})
         df = pd.merge_asof(df, f, on="time", direction="backward")
+        df["premium_index"] = df["premium_index"].astype(float)
+        avg_premium = average_premium_pct(df["premium_index"], bars_per_hour)
+        df["funding_rate"] = funding_rate_from_premium(avg_premium)
         df["funding_z"] = funding_z_score(df["funding_rate"], window=funding_window)
+        # premium_z is NUMERICALLY what the old, mislabeled `funding_z` was: a
+        # z-score of the premium series. Kept deliberately, because the clamp
+        # pins true funding at a flat 0.01% most of the time (88% of bars on
+        # BTC, 98% on SOL -- measured), and a z-score of a constant is
+        # undefined. So post-fix `funding_z` is correct but nearly information-
+        # free, while the PREMIUM is the quantity that actually varies. Adding
+        # this keeps the real signal available to the model under an honest
+        # name instead of losing it to the rename.
+        df["premium_z"] = funding_z_score(df["premium_index"], window=funding_window)
     else:
+        df["premium_index"] = 0.0
         df["funding_rate"] = 0.0
         df["funding_z"] = 0.0
+        df["premium_z"] = 0.0
 
     if mark is not None and spot is not None and not mark.empty and not spot.empty:
         m = mark.sort_values("time")[["time", "value"]].rename(columns={"value": "mark_price"})
@@ -110,8 +136,10 @@ def build_feature_frame(
     # Funding/basis can be legitimately unavailable (e.g. not backfilled yet) --
     # treat "no macro signal" as neutral rather than dropping the whole row,
     # which otherwise silently zeroes out the ML training set.
+    df["premium_index"] = df["premium_index"].fillna(0.0)
     df["funding_rate"] = df["funding_rate"].fillna(0.0)
     df["funding_z"] = df["funding_z"].fillna(0.0)
+    df["premium_z"] = df["premium_z"].fillna(0.0)
     df["basis"] = df["basis"].fillna(0.0)
 
     # -- External data (app/data/ingest_external.py) -----------------------
@@ -136,6 +164,14 @@ def build_feature_frame(
     if binance_funding is not None and not binance_funding.empty:
         bf = binance_funding.sort_values("time")[["time", "value"]].rename(columns={"value": "binance_funding_rate"})
         df = pd.merge_asof(df, bf, on="time", direction="backward")
+        # ccxt returns Binance funding as a FRACTION (8.5e-05 = 0.0085%), while
+        # Delta's funding_rate above is in PERCENT. Subtracting one from the
+        # other directly (as this did until 2026-09-02) is a 100x unit
+        # mismatch: Binance's leg was ~500x too small to move the result, so
+        # "funding_spread" was really just Delta's own number wearing a
+        # cross-exchange label. Converted here so the subtraction is
+        # apples-to-apples.
+        df["binance_funding_rate"] = df["binance_funding_rate"].astype(float) * 100.0
     else:
         df["binance_funding_rate"] = 0.0
     # Cross-exchange funding divergence: a genuinely different signal from
@@ -402,6 +438,15 @@ FEATURE_COLUMNS = [
     "ret_15",
     "funding_rate",
     "funding_z",
+    # Added 2026-09-02 alongside the funding-rate bug fix, NOT as a new idea
+    # being smuggled in without validation: this column carries exactly the
+    # numbers the mislabeled `funding_z` fed the model before the fix. Without
+    # it the rename would silently strip a varying input and replace it with a
+    # near-constant one (true funding sits pinned at the 0.01% interest rate
+    # 88% of bars on BTC, 98% on SOL). Existing saved models are unaffected
+    # either way -- predict.py reindexes to each model's OWN stored
+    # feature_columns list -- so this takes effect at the next retrain.
+    "premium_z",
     "basis",
     # Added after honest walk-forward + a genuine 70/30 holdout validation
     # (neither used to pick these specific 3 columns out of the larger
