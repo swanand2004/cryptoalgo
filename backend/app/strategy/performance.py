@@ -81,6 +81,7 @@ async def evaluate_all_strategies(
         binance_oi = await load_pseudo_series_df(f"BOI:{product.symbol}", "1h")
         binance_lsr = await load_pseudo_series_df(f"BLSR:{product.symbol}", "1h")
         dvol = await load_pseudo_series_df(f"DVOL:{product.symbol}", "1h")
+        news = await load_pseudo_series_df(f"NEWS:{product.symbol}", "1h")
         features = build_feature_frame(
             candles,
             funding=funding,
@@ -91,6 +92,7 @@ async def evaluate_all_strategies(
             binance_oi=binance_oi,
             binance_lsr=binance_lsr,
             dvol=dvol,
+            news=news,
         )
         symbol_data[product.symbol] = (features, product.contract_value)
 

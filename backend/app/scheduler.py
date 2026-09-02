@@ -177,6 +177,7 @@ async def _incremental_backfill_external(runtime) -> None:
     """
     from app.data.ingest_external import (
         FNG_SYMBOL,
+        fetch_and_store_news_sentiment,
         fetch_binance_funding_history,
         fetch_binance_long_short_ratio,
         fetch_binance_open_interest_hist,
@@ -214,6 +215,11 @@ async def _incremental_backfill_external(runtime) -> None:
                 await upsert_candles(f"DVOL:{symbol}", "1h", dvol)
         except Exception:
             logger.exception("Incremental Deribit DVOL refresh failed for %s", symbol)
+
+    try:
+        await fetch_and_store_news_sentiment([p.symbol for p in runtime.registry.all()])
+    except Exception:
+        logger.exception("Incremental news sentiment refresh failed")
 
 
 async def _deadman_switch_supervisor(runtime) -> None:
@@ -426,6 +432,7 @@ async def _retrain_models(runtime) -> None:
                 binance_oi = await load_pseudo_series_df(f"BOI:{symbol}", "1h")
                 binance_lsr = await load_pseudo_series_df(f"BLSR:{symbol}", "1h")
                 dvol = await load_pseudo_series_df(f"DVOL:{symbol}", "1h")
+                news = await load_pseudo_series_df(f"NEWS:{symbol}", "1h")
 
                 features = build_feature_frame(
                     candles,
@@ -437,6 +444,7 @@ async def _retrain_models(runtime) -> None:
                     binance_oi=binance_oi,
                     binance_lsr=binance_lsr,
                     dvol=dvol,
+                    news=news,
                 )
                 train_and_save(features, symbol=symbol, resolution=resolution, horizon_bars=cfg["horizon_bars"])
             except Exception:

@@ -116,6 +116,7 @@ async def run_backtest_endpoint(body: BacktestRequest, runtime: Runtime = Depend
     binance_oi = await load_pseudo_series_df(f"BOI:{body.symbol}", "1h")
     binance_lsr = await load_pseudo_series_df(f"BLSR:{body.symbol}", "1h")
     dvol = await load_pseudo_series_df(f"DVOL:{body.symbol}", "1h")
+    news = await load_pseudo_series_df(f"NEWS:{body.symbol}", "1h")
 
     features = build_feature_frame(
         candles,
@@ -127,6 +128,7 @@ async def run_backtest_endpoint(body: BacktestRequest, runtime: Runtime = Depend
         binance_oi=binance_oi,
         binance_lsr=binance_lsr,
         dvol=dvol,
+        news=news,
     )
     ensemble = await build_ensemble_for_symbol(body.symbol)
 

@@ -37,6 +37,7 @@ def build_feature_frame(
     binance_oi: pd.DataFrame | None = None,
     binance_lsr: pd.DataFrame | None = None,
     dvol: pd.DataFrame | None = None,
+    news: pd.DataFrame | None = None,
     higher_timeframe_candles: pd.DataFrame | None = None,
     cross_asset_candles: pd.DataFrame | None = None,
     symbol: str | None = None,
@@ -46,7 +47,7 @@ def build_feature_frame(
 
     `candles` must have columns [time, open, high, low, close, volume], one row
     per bar, sorted ascending by time. `funding`/`mark`/`spot`/`fear_greed`/
-    `binance_funding`/`binance_oi`/`binance_lsr`/`dvol` are all optional
+    `binance_funding`/`binance_oi`/`binance_lsr`/`dvol`/`news` are all optional
     dataframes with [time, value] columns and are forward-filled onto the
     candle grid via merge_asof -- each one missing independently degrades to
     a neutral default rather than dropping rows, exactly like funding/basis
@@ -173,7 +174,15 @@ def build_feature_frame(
         # neutral, not an error; see DERIBIT_CURRENCY in ingest_external.py.
         df["dvol_change"] = 0.0
 
-    for col in ("fear_greed_z", "funding_spread", "binance_oi_change", "binance_lsr_z", "dvol_change"):
+    if news is not None and not news.empty:
+        nw = news.sort_values("time")[["time", "value"]].rename(columns={"value": "news_sentiment"})
+        df = pd.merge_asof(df, nw, on="time", direction="backward")
+    else:
+        # No headline landed in this bucket yet (or the RSS fetch hasn't run
+        # at all) -- neutral, same treatment as every other optional source.
+        df["news_sentiment"] = 0.0
+
+    for col in ("fear_greed_z", "funding_spread", "binance_oi_change", "binance_lsr_z", "dvol_change", "news_sentiment"):
         df[col] = df[col].fillna(0.0)
 
     # -- Multi-timeframe context ---------------------------------------
@@ -437,6 +446,18 @@ FEATURE_COLUMNS = [
 # tried as a rule-based strategy input instead -- but not force-fed to the
 # model on the strength of theory alone. Same discipline as
 # TrendMomentumStrategy's efficiency-ratio gate.
+#
+# news_sentiment (app/data/ingest_external.py's RSS+VADER headline score,
+# added 2026-09-02) is excluded from FEATURE_COLUMNS for an even more basic
+# reason than the above: there is no free source of HISTORICAL crypto news,
+# so this column has ZERO real history on the day it's introduced and can
+# only ever start accumulating it from whichever run first calls
+# fetch_and_store_news_sentiment. Feeding a column that's 100% constant
+# "neutral" fill across the entire existing training window straight into a
+# tree model would reproduce the exact spurious-time-index-proxy failure
+# documented above, with even less real signal behind it. Revisit once
+# there's genuinely enough accumulated history to walk-forward test it
+# honestly -- not before.
 #
 # htf_trend_norm/htf_rsi_14/htf_bb_z (multi-timeframe context) and
 # btc_ret_5 (cross-asset BTC lead-lag) were tried in the SAME research

@@ -150,6 +150,7 @@ async def _build_features_for_resolution(
     binance_oi = await load_pseudo_series_df(f"BOI:{symbol}", "1h")
     binance_lsr = await load_pseudo_series_df(f"BLSR:{symbol}", "1h")
     dvol = await load_pseudo_series_df(f"DVOL:{symbol}", "1h")
+    news = await load_pseudo_series_df(f"NEWS:{symbol}", "1h")
     features = build_feature_frame(
         candles,
         funding=funding,
@@ -160,6 +161,7 @@ async def _build_features_for_resolution(
         binance_oi=binance_oi,
         binance_lsr=binance_lsr,
         dvol=dvol,
+        news=news,
     )
 
     # Historical bars have no stored order-book state, so book_imbalance/

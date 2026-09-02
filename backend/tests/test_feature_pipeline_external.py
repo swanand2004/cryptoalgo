@@ -33,8 +33,10 @@ def test_missing_external_series_default_to_neutral():
     assert (df["binance_oi_change"] == 0.0).all()
     assert (df["binance_lsr_z"] == 0.0).all()
     assert (df["dvol_change"] == 0.0).all()
+    assert (df["news_sentiment"] == 0.0).all()
     for col in FEATURE_COLUMNS:
         assert col in df.columns
+    assert "news_sentiment" not in FEATURE_COLUMNS  # zero real history on day one -- see the exclusion note
 
 
 def test_fear_greed_scaled_to_minus_one_to_one():
@@ -81,3 +83,17 @@ def test_dvol_change_defaults_neutral_when_absent_eg_solusd():
     df = build_feature_frame(_candles())
     assert (df["dvol_change"] == 0.0).all()
     assert np.isfinite(df["dvol_change"].to_numpy()).all()
+
+
+def test_news_sentiment_is_forward_filled_onto_the_bar_grid():
+    """News lands sparsely (a handful of hourly buckets, not one per bar) --
+    merge_asof direction='backward' must carry the last known reading
+    forward rather than leaving gaps as NaN."""
+    sparse_times = pd.Series([_TIMES.iloc[0], _TIMES.iloc[40]])
+    sparse_news = pd.DataFrame({"time": sparse_times, "value": [0.7, -0.3]})
+    df = build_feature_frame(_candles(), news=sparse_news)
+    assert df["news_sentiment"].iloc[0] == pytest.approx(0.7)
+    assert df["news_sentiment"].iloc[39] == pytest.approx(0.7)  # still carrying the first reading
+    assert df["news_sentiment"].iloc[40] == pytest.approx(-0.3)
+    assert df["news_sentiment"].iloc[-1] == pytest.approx(-0.3)
+    assert np.isfinite(df["news_sentiment"].to_numpy()).all()

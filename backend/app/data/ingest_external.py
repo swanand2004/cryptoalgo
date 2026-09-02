@@ -22,6 +22,24 @@ DERIBIT_CURRENCY = {"BTCUSD": "BTC", "ETHUSD": "ETH"}
 
 FNG_SYMBOL = "FNG:GLOBAL"
 
+# Free, no-API-key crypto trade-press RSS feeds. Deliberately global outlets,
+# not an India-specific source: Delta India's product is USD-quoted perps
+# (see funding-carry research elsewhere in this project), so what moves
+# BTC/ETH/SOL is global crypto news -- India-specific regulatory stories
+# (RBI/SEBI, crypto tax) that are actually market-relevant already surface
+# in this same global trade press, so one feed set covers both rather than
+# needing a separate "local news" source.
+NEWS_FEEDS = {
+    "coindesk": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "cointelegraph": "https://cointelegraph.com/rss",
+}
+NEWS_SYMBOL_KEYWORDS = {
+    "BTCUSD": ("bitcoin", "btc"),
+    "ETHUSD": ("ethereum", "eth", "ether"),
+    "SOLUSD": ("solana", "sol"),
+}
+NEWS_GLOBAL_SYMBOL = "NEWS:GLOBAL"
+
 
 async def fetch_fear_greed_index(limit: int = 0) -> list[dict]:
     """Crypto Fear & Greed Index (alternative.me) -- free, no API key, one
@@ -175,6 +193,131 @@ async def fetch_google_trends(keywords: list[str], timeframe: str = "today 12-m"
         return []
 
 
+async def fetch_crypto_news_headlines() -> list[dict]:
+    """Latest headlines from NEWS_FEEDS -- free, no API key. Each is a plain
+    RSS feed, so this only ever sees the CURRENT ~20-30 items per source,
+    never historical archives: there is no free source of historical crypto
+    news to backfill from, unlike Fear & Greed/Binance/Deribit above, which
+    all expose a real history endpoint. This can only start accumulating
+    real history from whenever it's first run, same limitation already
+    documented for Binance OI/long-short/DVOL (see the FEATURE_COLUMNS
+    exclusion note in feature_pipeline.py) -- and that limitation already
+    measurably HURT the model there (short history reads as a spurious
+    time-index proxy), so this is wired to compute and store the feature,
+    not to feed it to the ML model, until there's enough real history to
+    honestly walk-forward test it the same way.
+
+    Independently fault-tolerant per source, same as every other fetch_*
+    here -- one feed being down/blocked must not lose the other.
+    """
+    import feedparser
+
+    headlines: list[dict] = []
+    async with httpx.AsyncClient(
+        timeout=15.0, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True
+    ) as client:
+        for source, url in NEWS_FEEDS.items():
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                parsed = feedparser.parse(resp.content)
+                for entry in parsed.entries:
+                    title = getattr(entry, "title", None)
+                    published = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+                    if not title or published is None:
+                        continue
+                    t = int(time.mktime(published))
+                    headlines.append({"time": t, "title": title, "source": source})
+            except Exception:
+                logger.exception("News feed fetch failed for %s -- skipping, treated as unavailable", source)
+    return headlines
+
+
+def score_headline_sentiment(headlines: list[dict]) -> list[dict]:
+    """Attaches a VADER compound sentiment score in [-1, 1] to each headline.
+    VADER (rule-based, lexicon + heuristics) rather than a transformer model
+    like FinBERT: pure Python, no model download, no GPU/torch dependency --
+    this runs on the same local Windows machine as the trading loop itself,
+    and VADER was built and validated specifically for short, informal text,
+    which a headline is close enough to. Not finance-tuned, which is a real
+    limitation acted on honestly, not hidden: see the walk-forward
+    validation this feature is subject to before it's ever trusted with a
+    trading decision.
+    """
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+    analyzer = SentimentIntensityAnalyzer()
+    return [
+        {**h, "sentiment": analyzer.polarity_scores(h["title"])["compound"]}
+        for h in headlines
+    ]
+
+
+def aggregate_news_sentiment(scored_headlines: list[dict], keywords: tuple[str, ...] | None = None) -> list[dict]:
+    """Buckets scored headlines into hourly [time, open, high, low, close,
+    volume] rows (candle-shaped, like every other pseudo-series here) --
+    `close` is the mean sentiment for that hour, `volume` the headline count
+    (so a downstream reader can tell one-headline noise from a genuine
+    multi-story hour). `keywords`, if given, filters to headlines whose
+    title mentions any of them (case-insensitive) -- e.g. NEWS_SYMBOL_KEYWORDS
+    for a per-symbol series; omit for the NEWS_GLOBAL_SYMBOL market-wide mood.
+    """
+    if keywords is not None:
+        scored_headlines = [
+            h for h in scored_headlines if any(k in h["title"].lower() for k in keywords)
+        ]
+    if not scored_headlines:
+        return []
+
+    buckets: dict[int, list[float]] = {}
+    for h in scored_headlines:
+        hour = (h["time"] // 3600) * 3600
+        buckets.setdefault(hour, []).append(h["sentiment"])
+
+    candles = []
+    for hour, scores in sorted(buckets.items()):
+        mean_score = sum(scores) / len(scores)
+        candles.append(
+            {"time": hour, "open": mean_score, "high": mean_score, "low": mean_score,
+             "close": mean_score, "volume": float(len(scores))}
+        )
+    return candles
+
+
+async def fetch_and_store_news_sentiment(symbols: list[str]) -> None:
+    """Fetches the current RSS window once, scores it once, and buckets it
+    per symbol plus one global series -- rather than one fetch per symbol,
+    which would just hit the same two feeds redundantly and let one keyword
+    set's failure have nothing to do with another's.
+    """
+    try:
+        headlines = await fetch_crypto_news_headlines()
+        if not headlines:
+            return
+        scored = score_headline_sentiment(headlines)
+    except Exception:
+        logger.exception("News sentiment fetch/scoring failed")
+        return
+
+    try:
+        glob = aggregate_news_sentiment(scored, keywords=None)
+        if glob:
+            await upsert_candles(NEWS_GLOBAL_SYMBOL, "1h", glob)
+    except Exception:
+        logger.exception("News sentiment global aggregation/store failed")
+
+    for symbol in symbols:
+        keywords = NEWS_SYMBOL_KEYWORDS.get(symbol)
+        if keywords is None:
+            continue
+        try:
+            per_symbol = aggregate_news_sentiment(scored, keywords=keywords)
+            if per_symbol:
+                await upsert_candles(f"NEWS:{symbol}", "1h", per_symbol)
+        except Exception:
+            logger.exception("News sentiment aggregation/store failed for %s", symbol)
+
+
 async def backfill_external_all(symbols: list[str], lookback_days: int = 90) -> None:
     """Backfills every external pseudo-series used by build_feature_frame's
     optional external-data columns, for every symbol Delta trades. Each
@@ -218,3 +361,11 @@ async def backfill_external_all(symbols: list[str], lookback_days: int = 90) -> 
                 logger.info("Backfilled %d Deribit DVOL points for %s", len(dvol), symbol)
         except Exception:
             logger.exception("Deribit DVOL backfill failed for %s", symbol)
+
+    # No historical backfill possible for news (see fetch_crypto_news_headlines) --
+    # this just captures whatever's currently in the RSS window as a starting point.
+    try:
+        await fetch_and_store_news_sentiment(symbols)
+        logger.info("Captured initial news sentiment window for %s", symbols)
+    except Exception:
+        logger.exception("News sentiment initial capture failed")
