@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import logging
 import time
 
@@ -39,6 +40,49 @@ NEWS_SYMBOL_KEYWORDS = {
     "SOLUSD": ("solana", "sol"),
 }
 NEWS_GLOBAL_SYMBOL = "NEWS:GLOBAL"
+
+# VADER's general-purpose lexicon misses crypto/finance jargon entirely --
+# confirmed live against real headlines (2026-09-02): "The bearish 'Bart
+# Simpson' pattern is back as bitcoin and XRP prices..." scored a flat 0.0,
+# despite the word "bearish" appearing outright, because it simply isn't in
+# VADER's base word list. This is VADER's OWN documented extension
+# mechanism (updating `.lexicon`), not a different model or a hand-tuned
+# override of its scoring logic.
+#
+# Deliberately a short, UNAMBIGUOUS list only. Words like "dip", "support",
+# "resistance", or "correction" read as bullish or bearish depending on the
+# surrounding sentence (buying a dip vs. price dipping; a correction down
+# vs. a bug fix) -- adding those would misfire more often than the flat
+# zero they're replacing, so they're left out on purpose rather than
+# forgotten. Single tokens only: VADER looks up one word at a time, so a
+# multi-word phrase as a dict key would silently never match anything.
+CRYPTO_LEXICON_EXTENSION: dict[str, float] = {
+    # bullish
+    "bullish": 2.5, "rally": 2.0, "rallies": 2.0, "rallying": 2.0,
+    "surge": 2.2, "surges": 2.2, "surging": 2.2,
+    "soar": 2.3, "soars": 2.3, "soaring": 2.3,
+    "rebound": 1.8, "rebounds": 1.8, "rebounding": 1.8,
+    "breakout": 1.8, "moon": 1.5, "mooning": 1.8,
+    "adoption": 1.5, "accumulate": 1.3, "accumulation": 1.3,
+    "inflow": 1.5, "inflows": 1.5,
+    "approval": 1.8, "approved": 1.8, "approves": 1.8,
+    "ath": 2.0,
+    # bearish
+    "bearish": -2.5, "plunge": -2.5, "plunges": -2.5, "plunging": -2.5,
+    "crash": -2.8, "crashes": -2.8, "crashing": -2.8,
+    "dump": -1.8, "dumps": -1.8, "dumping": -1.8, "dumped": -1.8,
+    "hack": -2.5, "hacked": -2.5, "hacking": -2.3,
+    "exploit": -2.0, "exploited": -2.2, "breach": -2.0, "breached": -2.0,
+    "stolen": -2.3, "theft": -2.0,
+    "lawsuit": -1.5, "sues": -1.5, "sued": -1.5, "suing": -1.5,
+    "ban": -2.0, "banned": -2.2, "banning": -2.0, "crackdown": -2.2,
+    "liquidation": -2.0, "liquidated": -2.2, "liquidations": -2.0,
+    "outflow": -1.5, "outflows": -1.5,
+    "delist": -1.8, "delisted": -1.8, "delisting": -1.8,
+    "insolvent": -2.5, "insolvency": -2.5, "bankruptcy": -2.8, "bankrupt": -2.8,
+    "capitulation": -2.0, "selloff": -2.0, "sell-off": -2.0,
+    "fraud": -2.5, "scam": -2.5, "rug": -2.3, "rugpull": -2.5,
+}
 
 
 async def fetch_fear_greed_index(limit: int = 0) -> list[dict]:
@@ -226,7 +270,15 @@ async def fetch_crypto_news_headlines() -> list[dict]:
                     published = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
                     if not title or published is None:
                         continue
-                    t = int(time.mktime(published))
+                    # feedparser normalises published_parsed/updated_parsed to a
+                    # UTC struct_time -- time.mktime() would be wrong here, since
+                    # it interprets its input as LOCAL time and converts using
+                    # the process's own timezone. On this IST (UTC+5:30) machine
+                    # that silently shifted every headline's timestamp back by
+                    # 5.5 hours, making "just published" news read as ~6 hours
+                    # stale. calendar.timegm() is the UTC-correct inverse of
+                    # gmtime()/feedparser's own normalisation.
+                    t = calendar.timegm(published)
                     headlines.append({"time": t, "title": title, "source": source})
             except Exception:
                 logger.exception("News feed fetch failed for %s -- skipping, treated as unavailable", source)
@@ -239,14 +291,17 @@ def score_headline_sentiment(headlines: list[dict]) -> list[dict]:
     like FinBERT: pure Python, no model download, no GPU/torch dependency --
     this runs on the same local Windows machine as the trading loop itself,
     and VADER was built and validated specifically for short, informal text,
-    which a headline is close enough to. Not finance-tuned, which is a real
-    limitation acted on honestly, not hidden: see the walk-forward
-    validation this feature is subject to before it's ever trusted with a
-    trading decision.
+    which a headline is close enough to. Extended with CRYPTO_LEXICON_EXTENSION
+    for the crypto/finance jargon VADER's base lexicon has no opinion on at
+    all (see that dict's own comment) -- still nowhere near a dedicated
+    finance model like FinBERT, which is a real limitation acted on honestly,
+    not hidden: see the walk-forward validation this feature is subject to
+    before it's ever trusted with a trading decision.
     """
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
     analyzer = SentimentIntensityAnalyzer()
+    analyzer.lexicon.update(CRYPTO_LEXICON_EXTENSION)
     return [
         {**h, "sentiment": analyzer.polarity_scores(h["title"])["compound"]}
         for h in headlines

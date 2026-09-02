@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 import app.api.routes_news as routes_news
-from app.api.routes_news import _label, _matched_symbols, get_headlines, get_sentiment_history
+from app.api.routes_news import _impact, _label, _matched_symbols, get_headlines, get_sentiment_history
 
 
 def test_label_thresholds_match_vaders_own_convention():
@@ -13,6 +13,15 @@ def test_label_thresholds_match_vaders_own_convention():
     assert _label(0.0) == "neutral"
     assert _label(0.049) == "neutral"
     assert _label(-0.049) == "neutral"
+
+
+def test_impact_is_about_magnitude_not_direction():
+    assert _impact(0.6) == "high"
+    assert _impact(-0.6) == "high"
+    assert _impact(0.3) == "notable"
+    assert _impact(-0.3) == "notable"
+    assert _impact(0.1) is None
+    assert _impact(0.0) is None
 
 
 def test_matched_symbols_is_case_insensitive_and_can_match_multiple():

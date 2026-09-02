@@ -65,9 +65,40 @@ function useElementSize<T extends HTMLElement>() {
   return { ref, size }
 }
 
+/** A fixed, seeded starfield -- generated once, not re-randomized on every
+ * re-render (which would make stars visibly jitter each data refresh). */
+function useStarfield(count: number): { top: string; left: string; size: number; opacity: number }[] {
+  return useMemo(() => {
+    let seed = 42
+    const rand = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff
+      return seed / 0x7fffffff
+    }
+    return Array.from({ length: count }, () => ({
+      top: `${(rand() * 100).toFixed(2)}%`,
+      left: `${(rand() * 100).toFixed(2)}%`,
+      size: rand() > 0.85 ? 2 : 1,
+      opacity: 0.25 + rand() * 0.55,
+    }))
+  }, [count])
+}
+
+function CornerBrackets() {
+  const base = 'absolute h-4 w-4 border-cyan-500/50'
+  return (
+    <>
+      <div className={`${base} top-2 left-2 border-l-2 border-t-2`} />
+      <div className={`${base} top-2 right-2 border-r-2 border-t-2`} />
+      <div className={`${base} bottom-2 left-2 border-l-2 border-b-2`} />
+      <div className={`${base} bottom-2 right-2 border-r-2 border-b-2`} />
+    </>
+  )
+}
+
 export function NewsGlobe({ headlines }: { headlines: NewsHeadline[] }) {
   const { ref: containerRef, size } = useElementSize<HTMLDivElement>()
   const globeRef = useRef<GlobeMethods | undefined>(undefined)
+  const stars = useStarfield(90)
 
   const globeMaterial = useMemo(
     () =>
@@ -99,14 +130,16 @@ export function NewsGlobe({ headlines }: { headlines: NewsHeadline[] }) {
       }
     })
 
-    const pointsOut = Array.from(hubCounts.values()).map(({ hub, count }) => ({
+    const pointsOut = Array.from(hubCounts.values()).map(({ hub, count }, i) => ({
       lat: hub.lat,
       lng: hub.lng,
       name: hub.name,
       count,
       size: Math.min(1.4, 0.4 + count * 0.18),
+      isHome: false,
+      phase: i,
     }))
-    pointsOut.push({ lat: HOME.lat, lng: HOME.lng, name: `${HOME.name} (HQ)`, count: recent.length, size: 1.1 })
+    pointsOut.push({ lat: HOME.lat, lng: HOME.lng, name: `${HOME.name} (HQ)`, count: recent.length, size: 1.1, isHome: true, phase: 0 })
 
     return { arcs: arcsOut, points: pointsOut }
   }, [headlines])
@@ -121,20 +154,42 @@ export function NewsGlobe({ headlines }: { headlines: NewsHeadline[] }) {
     }
   }, [size.width])
 
+  const handleGlobeReady = () => {
+    // Opens on a view that actually shows Mumbai + the Asia/Middle-East hubs
+    // together, rather than react-globe.gl's default mid-Atlantic center.
+    globeRef.current?.pointOfView({ lat: 18, lng: 55, altitude: 2.3 }, 0)
+  }
+
   return (
-    <div ref={containerRef} className="relative w-full h-full min-h-[380px] overflow-hidden rounded-lg">
-      <div className="pointer-events-none absolute inset-0 z-10 bg-[radial-gradient(circle_at_center,transparent_55%,rgba(4,7,15,0.7)_100%)]" />
+    <div ref={containerRef} className="relative w-full h-full min-h-[380px] overflow-hidden rounded-lg bg-[#03060d]">
+      {stars.map((s, i) => (
+        <div
+          key={i}
+          className="absolute rounded-full bg-cyan-100 pointer-events-none"
+          style={{ top: s.top, left: s.left, width: s.size, height: s.size, opacity: s.opacity }}
+        />
+      ))}
+      <div className="pointer-events-none absolute inset-0 z-10 bg-[radial-gradient(circle_at_center,transparent_55%,rgba(3,6,13,0.75)_100%)]" />
+      <CornerBrackets />
+      <div className="pointer-events-none absolute top-3 left-8 z-20 flex items-center gap-1.5 font-mono text-[10px] text-cyan-500/80 uppercase tracking-widest">
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-cyan-400" />
+        </span>
+        Tracking {points.length} hubs
+      </div>
       {size.width > 0 && (
         <Globe
           ref={globeRef}
           width={size.width}
           height={size.height}
+          onGlobeReady={handleGlobeReady}
           backgroundColor="rgba(0,0,0,0)"
           globeMaterial={globeMaterial}
           showGraticules
           showAtmosphere
           atmosphereColor="#22d3ee"
-          atmosphereAltitude={0.22}
+          atmosphereAltitude={0.24}
           arcsData={arcs}
           arcColor={(d: any) => d.color}
           arcAltitudeAutoScale={0.32}
@@ -143,13 +198,20 @@ export function NewsGlobe({ headlines }: { headlines: NewsHeadline[] }) {
           arcDashGap={2.2}
           arcDashAnimateTime={2200}
           arcLabel={(d: any) => `<div style="font-family:monospace;font-size:11px;background:#04070fcc;border:1px solid #164e63;padding:4px 8px;border-radius:4px;color:#e2e8f0;max-width:220px">${d.hubName} &rarr; MUMBAI<br/>${d.title}</div>`}
+          ringsData={points}
+          ringLat={(d: any) => d.lat}
+          ringLng={(d: any) => d.lng}
+          ringColor={(d: any) => (t: number) => `rgba(103, 232, 249, ${(d.isHome ? 0.55 : 0.35) * (1 - t)})`}
+          ringMaxRadius={(d: any) => (d.isHome ? 5 : 2.6 + d.count * 0.4)}
+          ringPropagationSpeed={(d: any) => (d.isHome ? 2.2 : 1.6)}
+          ringRepeatPeriod={(d: any) => 1400 + (d.phase % 4) * 350}
           labelsData={points}
           labelLat={(d: any) => d.lat}
           labelLng={(d: any) => d.lng}
           labelText={(d: any) => d.name}
           labelSize={(d: any) => 0.38 + Math.min(0.3, d.count * 0.05)}
           labelDotRadius={(d: any) => 0.35 + Math.min(0.6, d.count * 0.12)}
-          labelColor={() => '#67e8f9'}
+          labelColor={(d: any) => (d.isHome ? '#a5f3fc' : '#67e8f9')}
           labelResolution={2}
         />
       )}

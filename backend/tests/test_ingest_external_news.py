@@ -1,3 +1,6 @@
+import calendar
+import time
+
 import pytest
 
 from app.data.ingest_external import (
@@ -55,3 +58,38 @@ def test_aggregate_news_sentiment_returns_empty_when_nothing_matches():
     scored = [{"time": 1_700_000_000, "title": "Ethereum upgrade scheduled", "source": "x", "sentiment": 0.2}]
     assert aggregate_news_sentiment(scored, keywords=NEWS_SYMBOL_KEYWORDS["SOLUSD"]) == []
     assert aggregate_news_sentiment([], keywords=None) == []
+
+
+def test_score_headline_sentiment_recognises_crypto_jargon_vader_misses_by_default():
+    """Real bug, confirmed live 2026-09-02: a headline containing the literal
+    word "bearish" scored a flat 0.0 under stock VADER because that word
+    simply isn't in its base lexicon. CRYPTO_LEXICON_EXTENSION fixes this by
+    extending VADER's own lexicon, not by replacing its scoring logic."""
+    headlines = [
+        {"time": 1, "title": "The bearish pattern is back as bitcoin prices slide", "source": "x"},
+        {"time": 2, "title": "Bitcoin rallies as ETF inflows surge to new highs", "source": "x"},
+        {"time": 3, "title": "Exchange hacked, funds stolen in major exploit", "source": "x"},
+        {"time": 4, "title": "Regulator issues crackdown, exchange faces ban", "source": "x"},
+    ]
+    scored = {h["title"]: s["sentiment"] for h, s in zip(headlines, score_headline_sentiment(headlines))}
+    assert scored["The bearish pattern is back as bitcoin prices slide"] < -0.1
+    assert scored["Bitcoin rallies as ETF inflows surge to new highs"] > 0.1
+    assert scored["Exchange hacked, funds stolen in major exploit"] < -0.3
+    assert scored["Regulator issues crackdown, exchange faces ban"] < -0.1
+
+
+def test_feedparser_utc_struct_time_must_use_timegm_not_mktime():
+    """Real bug, confirmed live 2026-09-02: headlines were showing as ~6
+    hours stale on this IST (UTC+5:30) machine. feedparser normalises
+    published_parsed/updated_parsed to a UTC struct_time, but time.mktime()
+    interprets its input as LOCAL time and converts using the process's own
+    timezone -- on an IST machine that silently shifted every timestamp back
+    by 5.5 hours. calendar.timegm() is the timezone-correct inverse of
+    gmtime(). This test doesn't depend on the machine's real timezone (it
+    would pass even on a UTC machine, where the bug would have been
+    invisible) -- it proves timegm is the mathematically correct choice by
+    round-tripping through gmtime().
+    """
+    known_epoch = 1_788_300_000
+    utc_struct = time.gmtime(known_epoch)
+    assert calendar.timegm(utc_struct) == known_epoch
