@@ -83,6 +83,37 @@ function useStarfield(count: number): { top: string; left: string; size: number;
   }, [count])
 }
 
+interface CountryFeature {
+  type: 'Feature'
+  properties: { NAME?: string; ADMIN?: string }
+  geometry: unknown
+}
+
+/** Real country borders (Natural Earth 110m admin-0, public domain), bundled
+ * locally in public/geo/ rather than fetched from an external CDN on every
+ * load -- this is a core dashboard page, so it shouldn't depend on some
+ * third party's uptime just to draw a map. */
+function useCountryPolygons(): CountryFeature[] {
+  const [features, setFeatures] = useState<CountryFeature[]>([])
+  useEffect(() => {
+    let cancelled = false
+    fetch('/geo/countries-110m.geojson')
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled) setFeatures(data.features ?? [])
+      })
+      .catch(() => {
+        // Missing map tiles degrade to the plain wireframe globe underneath --
+        // still fully functional (arcs/points/rings all still work), just
+        // without country outlines.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  return features
+}
+
 function CornerBrackets() {
   const base = 'absolute h-4 w-4 border-cyan-500/50'
   return (
@@ -99,6 +130,7 @@ export function NewsGlobe({ headlines }: { headlines: NewsHeadline[] }) {
   const { ref: containerRef, size } = useElementSize<HTMLDivElement>()
   const globeRef = useRef<GlobeMethods | undefined>(undefined)
   const stars = useStarfield(90)
+  const countries = useCountryPolygons()
 
   const globeMaterial = useMemo(
     () =>
@@ -150,7 +182,12 @@ export function NewsGlobe({ headlines }: { headlines: NewsHeadline[] }) {
     if (controls) {
       controls.autoRotate = true
       controls.autoRotateSpeed = 0.55
-      controls.enableZoom = false
+      controls.enableZoom = true
+      // Bounded, not unlimited -- three-globe's sphere has radius 100, so
+      // this keeps the closest zoom just above the surface and the
+      // farthest before the globe shrinks to an unreadable dot.
+      controls.minDistance = 110
+      controls.maxDistance = 520
     }
   }, [size.width])
 
@@ -178,6 +215,9 @@ export function NewsGlobe({ headlines }: { headlines: NewsHeadline[] }) {
         </span>
         Tracking {points.length} hubs
       </div>
+      <div className="pointer-events-none absolute bottom-3 right-8 z-20 font-mono text-[10px] text-cyan-500/60 uppercase tracking-widest">
+        scroll to zoom &middot; drag to rotate
+      </div>
       {size.width > 0 && (
         <Globe
           ref={globeRef}
@@ -186,10 +226,19 @@ export function NewsGlobe({ headlines }: { headlines: NewsHeadline[] }) {
           onGlobeReady={handleGlobeReady}
           backgroundColor="rgba(0,0,0,0)"
           globeMaterial={globeMaterial}
-          showGraticules
           showAtmosphere
           atmosphereColor="#22d3ee"
           atmosphereAltitude={0.24}
+          polygonsData={countries}
+          polygonGeoJsonGeometry={(d: any) => d.geometry}
+          polygonCapColor={() => 'rgba(14, 116, 144, 0.28)'}
+          polygonSideColor={() => 'rgba(8, 47, 73, 0.15)'}
+          polygonStrokeColor={() => '#22d3ee'}
+          polygonAltitude={0.006}
+          polygonsTransitionDuration={0}
+          polygonLabel={(d: any) =>
+            `<div style="font-family:monospace;font-size:11px;background:#04070fcc;border:1px solid #164e63;padding:3px 7px;border-radius:4px;color:#e2e8f0">${d.properties?.NAME ?? d.properties?.ADMIN ?? ''}</div>`
+          }
           arcsData={arcs}
           arcColor={(d: any) => d.color}
           arcAltitudeAutoScale={0.32}
