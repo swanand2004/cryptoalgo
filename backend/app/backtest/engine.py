@@ -47,6 +47,11 @@ class BacktestResult:
     signal: pd.Series
     position: pd.Series
     trades: list[Trade] = field(default_factory=list)
+    # Unix seconds per bar. Optional purely for backward compatibility with
+    # anything constructing a result by hand; report.py needs it for the
+    # calendar-aware metrics (CAGR, monthly breakdown) that can't be derived
+    # from a bar count alone.
+    times: pd.Series | None = None
 
 
 def run_backtest(
@@ -272,4 +277,5 @@ def run_backtest(
         signal=signal,
         position=pd.Series(position_contracts, index=df.index),
         trades=trades,
+        times=df["time"].reset_index(drop=True) if "time" in df.columns else None,
     )
