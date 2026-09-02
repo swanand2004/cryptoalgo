@@ -119,6 +119,133 @@ def probability_of_backtest_overfitting(perf: np.ndarray, n_splits: int = 10) ->
     return float(np.mean(np.asarray(logits) <= 0.0))
 
 
+def tail_metrics(
+    returns,
+    vol_events=None,
+    bars_per_year: int = 365 * 6,
+) -> dict:
+    """Tail-risk profile for a strategy. REQUIRED for anything with a
+    short-volatility payoff, because Sharpe cannot see this shape at all.
+
+    A strategy that wins 85% of the time in small increments and gives it
+    all back in one event has an excellent Sharpe right up until the event.
+    High win rate IS what selling insurance looks like; these metrics are
+    how you tell a real edge from an unpriced insurance premium.
+
+    `returns`: per-bar returns (simple, not log).
+    `vol_events`: timestamps of genuine stress episodes. Matched to the
+        NEAREST bar rather than requiring exact equality -- reindexing on
+        exact timestamps silently yields NaN, and a NaN sum reads as 0.0,
+        making a strategy that bled through every crisis look untouched.
+    """
+    import numpy as np
+    import pandas as pd
+
+    r = pd.Series(returns).astype(float)
+    r = r[np.isfinite(r)]
+    if len(r) < 10:
+        return {"insufficient_data": True, "n": int(len(r))}
+
+    wins = r[r > 0]
+    mean_win = float(wins.mean()) if len(wins) else np.nan
+    mean_ret = float(r.mean())
+
+    # Compound equity, then peak-to-trough. cumsum() is only an
+    # approximation of this and drifts as returns get larger.
+    equity = (1.0 + r).cumprod()
+    dd = float((equity / equity.cummax() - 1.0).min())
+
+    tail = r[r <= r.quantile(0.05)]
+    cvar95 = float(tail.mean()) if len(tail) else np.nan
+
+    # Deliberately normalised by mean WIN, not mean return: dividing by mean
+    # return flips sign on a losing strategy, which would let a
+    # catastrophic-tail loser pass a "< 15" style gate.
+    out = {
+        "n": int(len(r)),
+        "skew": float(r.skew()),
+        "kurtosis": float(r.kurtosis() + 3.0),  # raw, not excess
+        "worst_over_mean_win": float(abs(r.min()) / mean_win) if mean_win and mean_win > 0 else np.inf,
+        "cvar95_over_mean_win": float(abs(cvar95) / mean_win) if mean_win and mean_win > 0 else np.inf,
+        "max_drawdown": dd,
+        "calmar": float(mean_ret * bars_per_year / abs(dd)) if dd < 0 else np.inf,
+        "win_rate": float((r > 0).mean()),
+        "mean_return": mean_ret,
+    }
+
+    if vol_events is not None and len(vol_events) and isinstance(r.index, pd.DatetimeIndex):
+        idx = pd.DatetimeIndex(vol_events)
+        # nearest-bar matching, so an event between bars is still counted
+        pos = r.index.get_indexer(idx, method="nearest")
+        pos = pos[pos >= 0]
+        out["n_vol_events"] = int(len(pos))
+        out["return_in_events"] = float(r.iloc[pos].sum()) if len(pos) else np.nan
+    else:
+        out["n_vol_events"] = 0
+        out["return_in_events"] = np.nan
+
+    return out
+
+
+# Tail gates. Applied IN ADDITION to the Sharpe-based gates for any strategy
+# whose win rate is high enough to suggest a short-vol payoff.
+TAIL_GATES = {
+    "min_skew": -1.0,
+    "max_worst_over_mean_win": 20.0,
+    "max_cvar95_over_mean_win": 15.0,
+    "min_vol_events": 3,
+    "min_calmar": 0.5,
+}
+
+
+def evaluate_tail_gates(metrics: dict, gates: dict | None = None) -> tuple[bool, list[str]]:
+    """Returns (passed, reasons). A strategy that has never been observed
+    through a stress episode FAILS -- untested is not the same as safe."""
+    import numpy as np
+
+    g = gates or TAIL_GATES
+    if metrics.get("insufficient_data"):
+        return False, [f"only {metrics.get('n', 0)} returns -- not enough to characterise tails"]
+
+    failures = []
+    if metrics["skew"] < g["min_skew"]:
+        failures.append(f"skew {metrics['skew']:.2f} < {g['min_skew']} (fat left tail)")
+    if metrics["worst_over_mean_win"] > g["max_worst_over_mean_win"]:
+        failures.append(
+            f"worst loss is {metrics['worst_over_mean_win']:.1f}x the mean win "
+            f"(> {g['max_worst_over_mean_win']})"
+        )
+    if metrics["cvar95_over_mean_win"] > g["max_cvar95_over_mean_win"]:
+        failures.append(
+            f"CVaR95 is {metrics['cvar95_over_mean_win']:.1f}x the mean win "
+            f"(> {g['max_cvar95_over_mean_win']})"
+        )
+    if metrics["n_vol_events"] < g["min_vol_events"]:
+        failures.append(
+            f"observed through only {metrics['n_vol_events']} stress events "
+            f"(< {g['min_vol_events']}) -- untested, not safe"
+        )
+    calmar = metrics["calmar"]
+    if np.isfinite(calmar) and calmar < g["min_calmar"]:
+        failures.append(f"Calmar {calmar:.2f} < {g['min_calmar']}")
+    return (not failures), failures
+
+
+def find_vol_events(prices, window: int = 30, z: float = 3.0):
+    """Locates genuine stress episodes: bars whose absolute return exceeds
+    `z` rolling standard deviations. Used to supply `vol_events` above, so
+    "has this survived a crisis" is answered from data rather than assumed.
+    """
+    import numpy as np
+    import pandas as pd
+
+    p = pd.Series(prices).astype(float)
+    r = np.log(p).diff()
+    sd = r.rolling(window).std()
+    shock = r.abs() > z * sd
+    return p.index[shock.fillna(False)]
+
+
 # Thresholds a result must clear before it is allowed near live capital.
 # These are deliberately strict: this project's entire backtest history was
 # fabricated by an engine bug until 2026-08-31, and the live account is
