@@ -10,6 +10,7 @@ const NAV = [
   { to: '/strategies', label: 'Strategies' },
   { to: '/trades', label: 'Trades' },
   { to: '/gold', label: 'Gold' },
+  { to: '/news', label: 'News' },
 ]
 
 // Locking in a hit profit target is good news, so it gets its own (emerald,

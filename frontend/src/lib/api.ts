@@ -214,6 +214,26 @@ export interface GoldSnapshot {
   cross_asset?: GoldCrossAsset
 }
 
+export interface NewsHeadline {
+  title: string
+  source: string
+  time: number
+  sentiment: number
+  label: 'bullish' | 'bearish' | 'neutral'
+  symbols: string[]
+}
+
+export interface NewsHeadlinesResponse {
+  fetched_at: string | null
+  headlines: NewsHeadline[]
+}
+
+export interface NewsSentimentPoint {
+  time: number
+  sentiment: number
+  headline_count: number
+}
+
 export const api = {
   symbols: () => req<ProductInfo[]>('/market/symbols'),
   ticker: (symbol: string) => req<TickerInfo>(`/market/${symbol}/ticker`),
@@ -249,4 +269,8 @@ export const api = {
   goldSnapshot: () => req<GoldSnapshot>('/gold/snapshot'),
   goldCandles: (resolution = '1h', limit = 300) =>
     req<Candle[]>(`/gold/candles?resolution=${resolution}&limit=${limit}`),
+
+  newsHeadlines: (limit = 40) => req<NewsHeadlinesResponse>(`/news/headlines?limit=${limit}`),
+  newsSentimentHistory: (symbol = 'GLOBAL', hours = 72) =>
+    req<NewsSentimentPoint[]>(`/news/sentiment_history?symbol=${symbol}&hours=${hours}`),
 }

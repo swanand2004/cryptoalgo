@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import routes_gold, routes_market, routes_strategy, routes_trading, routes_ws
+from app.api import routes_gold, routes_market, routes_news, routes_strategy, routes_trading, routes_ws
 from app.config import ALLOWED_ORIGINS
 from app.data.ingest_rest import backfill_all
 from app.gold.ingest import gold_deep_backfill
@@ -79,6 +79,7 @@ app.include_router(routes_trading.router)
 app.include_router(routes_strategy.router)
 app.include_router(routes_ws.router)
 app.include_router(routes_gold.router)
+app.include_router(routes_news.router)
 
 
 @app.get("/api/health")

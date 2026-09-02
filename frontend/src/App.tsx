@@ -5,6 +5,7 @@ import Markets from './pages/Markets'
 import Strategies from './pages/Strategies'
 import Trades from './pages/Trades'
 import Gold from './pages/Gold'
+import News from './pages/News'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="strategies" element={<Strategies />} />
         <Route path="trades" element={<Trades />} />
         <Route path="gold" element={<Gold />} />
+        <Route path="news" element={<News />} />
       </Route>
     </Routes>
   )
