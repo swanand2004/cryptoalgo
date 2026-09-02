@@ -168,6 +168,43 @@ class Settings(BaseSettings):
     # stop or when tightening starts (see atr_breakeven_trigger_multiple).
     atr_tightened_trail_multiple: float = 0.4  # trail distance, in ATRs, once triggered
 
+    # -- Regime-aware sizing (app/strategy/regime.py) -----------------------
+    # DEFAULT OFF -- measured, and it failed its own test.
+    #
+    # The idea: holding contract count constant while the asset's ATR doubles
+    # is silently a doubled risk position, so cut size in high-vol regimes.
+    # Thresholds were fixed from convention (Wilder's ADX 25, symmetric 25/75
+    # percentiles, 0.5x in high vol) BEFORE measuring, and deliberately not
+    # tuned afterwards.
+    #
+    # Measured 2026-09-02, one pre-committed config, baseline vs regime across
+    # BTC/ETH/SOL on 1h and 4h:
+    #     shallower drawdown : 6/6   (mean -29.90% -> -26.62%)
+    #     higher return      : 0/6   (mean  -6.74% -> -15.19%)
+    #     higher Sharpe      : 0/6   (mean  -0.38  ->  -1.91)
+    #
+    # The risk claim held perfectly. It is still turned off, because Sharpe
+    # degrading on 6 of 6 with no exceptions means the trade is inefficient:
+    # a size cut that merely scaled risk down would leave Sharpe roughly flat.
+    # Falling everywhere means it is cutting size on the WRONG bars -- the
+    # high-vol stretches that were, in this sample, the profitable ones.
+    # BTC 4h is the clearest: +26.09% -> +5.84%, surrendering 20 points of
+    # return to buy 2.4 points of drawdown.
+    #
+    # Kept wired and configurable rather than deleted: the machinery is
+    # correct and tested, the DEFAULT PARAMETERISATION is what failed. A
+    # different multiplier or a vol measure that separates "volatile and
+    # trending" from "volatile and chopping" could plausibly work -- but that
+    # is a new hypothesis needing its own out-of-sample test, not a knob to
+    # twist until this backtest looks better.
+    regime_sizing_enabled: bool = False
+    regime_high_vol_size_multiplier: float = 0.5
+    regime_low_vol_size_multiplier: float = 1.0
+    regime_adx_trend_threshold: float = 25.0  # Wilder's standard trend/no-trend line
+    regime_vol_lookback_bars: int = 200
+    regime_low_vol_percentile: float = 0.25
+    regime_high_vol_percentile: float = 0.75
+
     @property
     def symbol_list(self) -> list[str]:
         return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]

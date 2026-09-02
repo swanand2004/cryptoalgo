@@ -369,6 +369,40 @@ async def get_live_ml_predictions(runtime) -> dict[str, dict[str, dict]]:
     return out
 
 
+def _regime_size_multiplier(runtime, features) -> tuple[float, str]:
+    """How much of normal size this bar's volatility regime allows.
+
+    Same app/strategy/regime.py classifier the backtest engine calls, so live
+    and backtest sizing cannot silently diverge. Fails OPEN (1.0, normal size)
+    on any error rather than blocking trading -- a regime classifier is a risk
+    refinement, not a safety-critical gate, and a crash here must not take the
+    trading loop down with it.
+    """
+    if not getattr(runtime.settings, "regime_sizing_enabled", False):
+        return 1.0, "disabled"
+    try:
+        from app.strategy.regime import VolRegime, classify
+
+        _, vol_regime = classify(
+            features,
+            adx_trend_threshold=runtime.settings.regime_adx_trend_threshold,
+            vol_lookback_bars=runtime.settings.regime_vol_lookback_bars,
+            low_vol_percentile=runtime.settings.regime_low_vol_percentile,
+            high_vol_percentile=runtime.settings.regime_high_vol_percentile,
+        )
+        if len(vol_regime) == 0:
+            return 1.0, "unknown"
+        label = str(vol_regime.iloc[-1])
+        return {
+            VolRegime.LOW.value: runtime.settings.regime_low_vol_size_multiplier,
+            VolRegime.NORMAL.value: 1.0,
+            VolRegime.HIGH.value: runtime.settings.regime_high_vol_size_multiplier,
+        }.get(label, 1.0), label
+    except Exception:
+        logger.exception("Regime classification failed -- sizing at normal size")
+        return 1.0, "error"
+
+
 def _compute_member_target(
     runtime, product, features, price: float, positions: dict, equity: float,
     *, strategy_name: str, signal_ensemble,
@@ -389,6 +423,8 @@ def _compute_member_target(
         raw_signal, current_sign, signal_ensemble.deadband, signal_ensemble.exit_deadband
     )
 
+    size_multiplier, vol_label = _regime_size_multiplier(runtime, features)
+
     target_contracts = fixed_margin_contracts(
         SizingInputs(
             equity_usd=equity,
@@ -398,8 +434,14 @@ def _compute_member_target(
             margin_per_trade_pct=runtime.settings.max_margin_per_trade_pct,
             min_leverage=runtime.settings.min_leverage,
             max_leverage=runtime.settings.max_leverage,
+            size_multiplier=size_multiplier,
         )
     )
+    if size_multiplier != 1.0 and latest_signal != 0:
+        logger.info(
+            "%s %s: %s regime -> sizing at %.0f%% of normal (signal %.3f, target %d contracts)",
+            product.symbol, strategy_name, vol_label, size_multiplier * 100, latest_signal, target_contracts,
+        )
     return current, target_contracts, latest_signal
 
 

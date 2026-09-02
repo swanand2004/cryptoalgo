@@ -29,6 +29,13 @@ class BacktestConfig:
     atr_tightened_trail_multiple: float = 0.4
     min_leverage: float = 10.0
     max_leverage: float = 15.0
+    # Regime-aware sizing. Default False here so every EXISTING backtest and
+    # test keeps producing byte-identical results -- the comparison of
+    # with-vs-without is the whole point, and silently flipping it on would
+    # destroy the baseline it needs to be measured against.
+    regime_sizing_enabled: bool = False
+    regime_high_vol_size_multiplier: float = 0.5
+    regime_low_vol_size_multiplier: float = 1.0
 
 
 @dataclass
@@ -76,6 +83,24 @@ def run_backtest(
     df = df.reset_index(drop=True)
     signal = ensemble.smoothed_signal(df)
     warmup = ensemble.warmup_bars()
+
+    # Per-bar regime size multiplier, computed from the SAME regime module the
+    # live loop uses so the two cannot drift apart. classify() is strictly
+    # causal (trailing, shifted percentiles), so reading bar i's multiplier
+    # introduces no lookahead -- and it is applied at bar i using bar i-1's
+    # signal, exactly like every other decision in this loop.
+    if cfg.regime_sizing_enabled:
+        from app.strategy.regime import VolRegime, classify
+
+        _, vol_regime = classify(df)
+        multiplier_by_regime = {
+            VolRegime.LOW.value: cfg.regime_low_vol_size_multiplier,
+            VolRegime.NORMAL.value: 1.0,
+            VolRegime.HIGH.value: cfg.regime_high_vol_size_multiplier,
+        }
+        size_multipliers = vol_regime.map(multiplier_by_regime).fillna(1.0).astype(float).to_numpy()
+    else:
+        size_multipliers = np.ones(len(df), dtype=float)
 
     n = len(df)
     equity = np.full(n, cfg.starting_equity, dtype=float)
@@ -227,6 +252,7 @@ def run_backtest(
                 margin_per_trade_pct=cfg.margin_per_trade_pct,
                 min_leverage=cfg.min_leverage,
                 max_leverage=cfg.max_leverage,
+                size_multiplier=float(size_multipliers[i]),
             )
         )
 

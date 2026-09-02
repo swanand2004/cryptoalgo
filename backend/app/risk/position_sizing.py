@@ -12,6 +12,12 @@ class SizingInputs:
     margin_per_trade_pct: float = 0.10  # fraction of equity committed as margin, every trade, regardless of conviction; always overridden by settings.max_margin_per_trade_pct in practice
     min_leverage: float = 10.0  # always overridden by settings.min_leverage in practice
     max_leverage: float = 50.0  # always overridden by settings.max_leverage in practice
+    # Regime-based scaling of the committed margin (see app/strategy/regime.py).
+    # 1.0 is a no-op, so every existing caller behaves exactly as before.
+    # Deliberately applied to MARGIN rather than to the signal: scaling the
+    # signal would also drag it through the deadband and silently change
+    # WHETHER a trade happens, conflating "trade smaller" with "don't trade".
+    size_multiplier: float = 1.0
 
 
 def fixed_margin_contracts(inputs: SizingInputs) -> int:
@@ -35,7 +41,8 @@ def fixed_margin_contracts(inputs: SizingInputs) -> int:
 
     quality = min(1.0, abs(inputs.signal))
     leverage = select_leverage(quality, inputs.min_leverage, inputs.max_leverage)
-    margin_usd = inputs.equity_usd * inputs.margin_per_trade_pct
+    multiplier = max(0.0, inputs.size_multiplier)
+    margin_usd = inputs.equity_usd * inputs.margin_per_trade_pct * multiplier
     notional_usd = margin_usd * leverage
 
     notional_per_contract = inputs.contract_value * inputs.price
