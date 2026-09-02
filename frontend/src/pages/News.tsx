@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, type NewsHeadline, type NewsSentimentPoint } from '../lib/api'
+import { NewsGlobe } from '../components/NewsGlobe'
 
 const TABS = [
   { key: 'ALL', label: 'All' },
@@ -14,7 +15,7 @@ type TabKey = (typeof TABS)[number]['key']
 const LABEL_STYLE: Record<string, { text: string; dot: string; chip: string }> = {
   bullish: { text: 'Bullish', dot: 'bg-emerald-400', chip: 'bg-emerald-950 text-emerald-400 border border-emerald-900' },
   bearish: { text: 'Bearish', dot: 'bg-red-400', chip: 'bg-red-950 text-red-400 border border-red-900' },
-  neutral: { text: 'Neutral', dot: 'bg-neutral-500', chip: 'bg-neutral-800 text-neutral-400' },
+  neutral: { text: 'Neutral', dot: 'bg-cyan-400', chip: 'bg-cyan-950 text-cyan-400 border border-cyan-900' },
 }
 
 function labelFor(sentiment: number): string {
@@ -81,7 +82,7 @@ function SentimentGauge({ title, symbol }: { title: string; symbol: string }) {
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <div className="text-xs font-medium text-neutral-400">{title}</div>
+        <div className="text-xs font-medium text-neutral-400 uppercase tracking-wide">{title}</div>
         {label && <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${label.chip}`}>{label.text}</span>}
       </div>
       <div className="font-mono text-2xl tabular-nums text-neutral-100">
@@ -96,16 +97,16 @@ function SentimentGauge({ title, symbol }: { title: string; symbol: string }) {
 function HeadlineRow({ headline }: { headline: NewsHeadline }) {
   const style = LABEL_STYLE[headline.label] ?? LABEL_STYLE.neutral
   return (
-    <div className="flex items-start gap-3 py-3 px-4 border-b border-neutral-800 last:border-b-0">
-      <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${style.dot}`} />
+    <div className="flex items-start gap-3 py-3 px-4 border-b border-neutral-800/70 last:border-b-0 hover:bg-neutral-800/20 transition-colors">
+      <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 shadow-[0_0_6px_currentColor] ${style.dot}`} />
       <div className="flex-1 min-w-0">
         <div className="text-sm text-neutral-200 leading-snug">{headline.title}</div>
-        <div className="mt-1.5 flex items-center flex-wrap gap-2 text-[11px] text-neutral-600">
+        <div className="mt-1.5 flex items-center flex-wrap gap-2 text-[11px] text-neutral-600 font-mono">
           <span className="uppercase tracking-wide">{headline.source}</span>
           <span>&middot;</span>
           <span>{timeAgo(headline.time)}</span>
           {headline.symbols.map((s) => (
-            <span key={s} className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400 font-mono">
+            <span key={s} className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400">
               {symbolTag(s)}
             </span>
           ))}
@@ -117,6 +118,50 @@ function HeadlineRow({ headline }: { headline: NewsHeadline }) {
           {headline.sentiment >= 0 ? '+' : ''}
           {headline.sentiment.toFixed(2)}
         </div>
+      </div>
+    </div>
+  )
+}
+
+function GlobalPulsePanel({ headlines }: { headlines: NewsHeadline[] }) {
+  const counts = useMemo(() => {
+    const c = { bullish: 0, bearish: 0, neutral: 0 }
+    for (const h of headlines) c[h.label as keyof typeof c] = (c[h.label as keyof typeof c] ?? 0) + 1
+    return c
+  }, [headlines])
+  const total = counts.bullish + counts.bearish + counts.neutral
+
+  return (
+    <div className="flex flex-col gap-4 rounded-lg border border-cyan-900/40 bg-neutral-950/60 p-4 shadow-[0_0_25px_-8px_rgba(34,211,238,0.25)]">
+      <div>
+        <div className="text-[11px] font-medium text-cyan-500 uppercase tracking-[0.2em]">Global Pulse</div>
+        <div className="text-[11px] text-neutral-600 mt-1">Last {total} headlines, live feed</div>
+      </div>
+
+      <div className="space-y-2.5">
+        {(['bullish', 'neutral', 'bearish'] as const).map((k) => {
+          const style = LABEL_STYLE[k]
+          const pct = total > 0 ? (counts[k] / total) * 100 : 0
+          return (
+            <div key={k}>
+              <div className="flex items-center justify-between text-[11px] mb-1">
+                <span className="text-neutral-400">{style.text}</span>
+                <span className="font-mono text-neutral-500">{counts[k]}</span>
+              </div>
+              <div className="h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${k === 'bullish' ? 'bg-emerald-500' : k === 'bearish' ? 'bg-red-500' : 'bg-cyan-500'}`}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="pt-3 border-t border-neutral-800/70 text-[11px] text-neutral-600 leading-relaxed">
+        Hub positions are illustrative -- headlines aren't geotagged at the source, so each is placed at the
+        financial center its own text most plausibly concerns, not a detected origin.
       </div>
     </div>
   )
@@ -138,15 +183,29 @@ export default function News() {
   )
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="max-w-7xl mx-auto space-y-6">
       <div className="rounded-lg border border-neutral-800 bg-gradient-to-b from-neutral-900 to-neutral-900/60 p-4">
-        <div className="text-sm font-medium text-neutral-200">News & Sentiment</div>
+        <div className="flex items-center gap-2">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-cyan-500" />
+          </span>
+          <div className="text-sm font-medium text-neutral-200 uppercase tracking-wide">News &amp; Sentiment</div>
+          <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Global Feed</span>
+        </div>
         <div className="text-xs text-neutral-600 mt-1 max-w-2xl">
           Free crypto trade press (CoinDesk + CoinTelegraph), scored with VADER sentiment. Context for reading the
           market, not a trading input yet -- there's no free historical news archive, so this only has real history
           from 2026-09-02 onward, and it isn't fed to any strategy until there's enough of it to walk-forward test
           honestly.
         </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2 rounded-lg border border-cyan-900/40 bg-[radial-gradient(circle_at_30%_20%,rgba(8,145,178,0.08),transparent_60%)] p-2 h-[420px]">
+          <NewsGlobe headlines={headlines} />
+        </div>
+        <GlobalPulsePanel headlines={headlines} />
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -172,7 +231,9 @@ export default function News() {
             ))}
           </div>
           {headlinesQuery.data?.fetched_at && (
-            <div className="text-[11px] text-neutral-600">updated {timeAgo(Math.floor(new Date(headlinesQuery.data.fetched_at).getTime() / 1000))}</div>
+            <div className="text-[11px] text-neutral-600 font-mono">
+              updated {timeAgo(Math.floor(new Date(headlinesQuery.data.fetched_at).getTime() / 1000))}
+            </div>
           )}
         </div>
 
