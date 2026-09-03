@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.config import ALLOWED_ORIGINS
+from app.config import is_allowed_origin
 from app.core.time_utils import to_iso_utc
 from app.data.app_state import get_trading_mode
 from app.runtime import get_runtime_sync
@@ -29,7 +29,11 @@ async def dashboard_feed(websocket: WebSocket) -> None:
     # data exposure (the socket never calls receive(), so it can't place
     # orders), but it's still a real leak worth closing off.
     origin = websocket.headers.get("origin")
-    if origin is not None and origin not in ALLOWED_ORIGINS:
+    if not is_allowed_origin(origin):
+        # Logged, not silent: a bare 403 during the handshake gives no clue
+        # WHICH origin was refused, which made this genuinely hard to diagnose
+        # when the dev server started advertising a LAN URL.
+        logger.warning("Dashboard websocket refused: origin %r is not permitted", origin)
         await websocket.close(code=1008)
         return
 

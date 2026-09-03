@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from enum import Enum
 from functools import lru_cache
 
@@ -20,6 +22,45 @@ class TradingMode(str, Enum):
 # check (WebSocket -- CORSMiddleware only inspects HTTP scope, so it does NOT
 # protect the /ws/dashboard route at all; both must agree on one allowlist).
 ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# Any private/loopback address on the dev port is also acceptable.
+#
+# Why this exists: the Vite dev server was changed on 2026-09-03 to bind all
+# interfaces (host: true), because binding only "localhost" resolved to the
+# IPv6 loopback and left the dashboard unreachable over IPv4. That fix made
+# Vite advertise a LAN URL (e.g. http://192.168.0.101:5173), and opening it
+# sent an Origin the static allowlist above rejected -- every dashboard
+# WebSocket got a 403 with no explanation of why.
+#
+# The protection that actually matters is unchanged: a page on the public
+# internet still cannot open this socket and read live equity/positions. What
+# is now allowed is only loopback and RFC1918 private ranges -- i.e. this
+# machine, or a device on the same home network, which is exactly who is
+# meant to reach a locally-hosted dashboard.
+_PRIVATE_ORIGIN_RE = re.compile(
+    r"^https?://("
+    r"localhost"
+    r"|127\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|\[::1\]"
+    r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|192\.168\.\d{1,3}\.\d{1,3}"
+    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+    r")(:\d+)?$"
+)
+
+
+def is_allowed_origin(origin: str | None) -> bool:
+    """True if `origin` may open the dashboard socket.
+
+    A missing Origin is allowed: non-browser clients (the project's own
+    tests, a CLI websocket client) do not send one, and the header is only a
+    meaningful signal when a browser sets it.
+    """
+    if origin is None:
+        return True
+    if origin in ALLOWED_ORIGINS:
+        return True
+    return bool(_PRIVATE_ORIGIN_RE.match(origin))
 
 
 class Settings(BaseSettings):

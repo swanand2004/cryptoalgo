@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import routes_gold, routes_market, routes_news, routes_strategy, routes_trading, routes_ws
-from app.config import ALLOWED_ORIGINS
+from app.config import ALLOWED_ORIGINS, _PRIVATE_ORIGIN_RE
 from app.data.ingest_rest import backfill_all
 from app.gold.ingest import gold_deep_backfill
 from app.runtime import Runtime, get_or_create_runtime
@@ -70,6 +70,9 @@ app = FastAPI(title="cryptoalgo", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    # Same private/loopback rule the WebSocket check uses, so HTTP and WS
+    # cannot disagree about who is allowed in.
+    allow_origin_regex=_PRIVATE_ORIGIN_RE.pattern,
     allow_methods=["*"],
     allow_headers=["*"],
 )
