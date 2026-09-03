@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from app.config import get_settings
 from app.data.db import SessionLocal
 from app.data.models import StrategyConfig
 from app.strategy.ensemble import SignalEnsemble, WeightedStrategy
@@ -98,4 +99,13 @@ async def build_ensemble_for_symbol(symbol: str, ml_resolution: str = "15m") -> 
         weight, enabled = weight_of(name)
         members.append(WeightedStrategy(strategy=strategy, weight=weight, enabled=enabled))
 
-    return SignalEnsemble(members)
+    # Thresholds come from settings rather than SignalEnsemble's constructor
+    # defaults, so the line that decides whether anything trades at all is
+    # configurable without a code edit. See Settings.signal_deadband.
+    settings = get_settings()
+    return SignalEnsemble(
+        members,
+        deadband=settings.signal_deadband,
+        smoothing_span=settings.signal_smoothing_span,
+        exit_deadband=settings.signal_exit_deadband,
+    )

@@ -168,6 +168,30 @@ class Settings(BaseSettings):
     # stop or when tightening starts (see atr_breakeven_trigger_multiple).
     atr_tightened_trail_multiple: float = 0.4  # trail distance, in ATRs, once triggered
 
+    # -- Signal thresholds (app/strategy/ensemble.py) -----------------------
+    # Was hardcoded as SignalEnsemble constructor defaults, so the single most
+    # important number in the system -- the line that decides whether anything
+    # trades at all -- could not be changed without editing code.
+    #
+    # Why it needed lowering (measured 2026-09-03): since consolidating to one
+    # blended position on 2026-09-01, ZERO trades had fired in 47+ hours. Not a
+    # bug -- the live signal path was verified to match the backtest exactly
+    # (fires on 15-17% of 4h bars) and the last 12 bars genuinely peaked at
+    # 0.125 / 0.115 / 0.071 against the 0.15 line. The blend is a weighted
+    # AVERAGE, so it can never exceed its largest member and collapses toward
+    # zero whenever members disagree -- and trend_momentum vs tsmom, which
+    # normally correlate +0.73, were pointing in opposite directions.
+    #
+    # Consolidation therefore raised the effective bar without anyone choosing
+    # to: the same 0.15 that a single member cleared on ~36% of bars is only
+    # cleared by the blend on ~19%.
+    signal_deadband: float = 0.15
+    # Exit line, deliberately looser than entry so a position is not flattened
+    # by the same noise that would not have been enough to open it. None means
+    # "derive as deadband * 0.4", preserving the original relationship.
+    signal_exit_deadband: float | None = None
+    signal_smoothing_span: int = 3
+
     # -- Regime-aware sizing (app/strategy/regime.py) -----------------------
     # DEFAULT OFF -- measured, and it failed its own test.
     #

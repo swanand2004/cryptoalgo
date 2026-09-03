@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 import pandas as pd
 
@@ -138,3 +139,27 @@ def test_backtest_regime_sizing_actually_reduces_exposure_when_enabled():
     # ...and the calm half must be untouched, or this is just a blanket
     # size cut wearing a regime label.
     assert on.position.abs().iloc[:half].max() == off.position.abs().iloc[:half].max()
+
+
+def test_signal_thresholds_come_from_config_not_hardcoded_defaults(monkeypatch):
+    """The line that decides whether anything trades at all must be
+    configurable. It was a SignalEnsemble constructor default until
+    2026-09-03, so it could not be changed without editing code."""
+    import asyncio
+
+    from app.config import Settings, get_settings
+    import app.strategy.registry as registry
+
+    custom = Settings(signal_deadband=0.07, signal_smoothing_span=5)
+    monkeypatch.setattr(registry, "get_settings", lambda: custom)
+
+    async def _fake_configs():
+        return {}
+
+    monkeypatch.setattr(registry, "load_strategy_configs", _fake_configs)
+    ens = asyncio.run(registry.build_ensemble_for_symbol("BTCUSD"))
+    assert ens.deadband == 0.07
+    assert ens.smoothing_span == 5
+    # exit line stays looser than entry, derived when not set explicitly
+    assert ens.exit_deadband == pytest.approx(0.07 * 0.4)
+    get_settings.cache_clear()
