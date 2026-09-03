@@ -292,9 +292,11 @@ async def test_stop_loss_and_take_profit_computed_on_entry_when_atr_given():
         OrderRequest(symbol="BTCUSD", side="buy", size=10, order_type="market", strategy="trend_momentum", atr=200.0)
     )
     pos = await _position("trend_momentum")
-    # default atr_stop_multiple=2.0, atr_take_profit_multiple=3.0
-    assert pos.stop_loss_price == pytest.approx(pos.entry_price - 2.0 * 200.0)
-    assert pos.take_profit_price == pytest.approx(pos.entry_price + 3.0 * 200.0)
+    # Derived from config, so this tests that the broker APPLIES the configured
+    # multiples rather than pinning whatever they currently happen to be.
+    cfg = Settings(delta_api_key="k", delta_api_secret="s")
+    assert pos.stop_loss_price == pytest.approx(pos.entry_price - cfg.atr_stop_multiple * 200.0)
+    assert pos.take_profit_price == pytest.approx(pos.entry_price + cfg.atr_take_profit_multiple * 200.0)
 
 
 @pytest.mark.asyncio
@@ -459,12 +461,22 @@ async def test_stop_loss_take_profit_stay_fixed_when_position_is_extended():
 
 
 @pytest.mark.asyncio
-async def test_default_settings_trail_aggressively():
-    """Locks in the live default (not just an explicitly-pinned scenario):
-    per an explicit "make the trailing more aggressive" request, the
-    breakeven/tighten trigger dropped from 1.0 to 0.5 ATR and the tightened
-    trail dropped from 0.8 to 0.4 ATR -- a smaller favorable move now counts
-    as "committed" and the stop hugs the peak closer once it does.
+async def test_default_settings_do_not_cut_winners_short():
+    """Locks in the live default, REVERSED on 2026-09-03 after measurement.
+
+    This test previously asserted the opposite -- that a mere 0.6-ATR
+    favourable move tightened the stop and floored it at breakeven, per an
+    explicit "make the trailing more aggressive" request that was never
+    backtested. Measured over 9 years and 9,411 trades, that policy was the
+    single largest destroyer of the strategy: winners were cut at ~0.4-0.5
+    ATR while losers ran the full stop, giving average loss 1.6-2x average
+    win. The strategy won 58-60% of trades and still went to -99%, because
+    it needed 61-66% just to break even.
+
+    With the trigger raised to 3.0 ATR (>= the take-profit distance) the
+    trail cannot engage before the target is hit, so a winner is allowed to
+    run. Out-of-sample effect: payoff ratio 0.59 -> 1.53, return -75.2% ->
+    +1.4%.
     """
     cache = _cache_with_book(bid=49_990, ask=50_010)
     broker = PaperBroker(_registry(), cache, Settings(delta_api_key="k", delta_api_secret="s"))
@@ -473,16 +485,22 @@ async def test_default_settings_trail_aggressively():
         OrderRequest(symbol="BTCUSD", side="buy", size=10, order_type="market", strategy="trend_momentum", atr=200.0)
     )
     pos_before = await _position("trend_momentum")
+    original_stop = pos_before.stop_loss_price
 
-    # Only 120 favorable -- below the OLD 1.0-ATR (200) trigger, but past
-    # the NEW 0.5-ATR (100) one.
-    new_peak = pos_before.entry_price + 120
+    # A solid 1.5-ATR favourable move -- which under the OLD 0.5-ATR trigger
+    # would have tightened the stop and floored it at breakeven.
+    new_peak = pos_before.entry_price + 300
     cache.update_orderbook("BTCUSD", bids=[[new_peak - 5, 100]], asks=[[new_peak + 5, 100]], timestamp=2)
     await broker.check_stop_loss_take_profit()
 
     pos_after = await _position("trend_momentum")
-    assert pos_after.stop_loss_price > pos_before.entry_price  # already floored at breakeven
-    assert pos_after.stop_loss_price == pytest.approx(new_peak - 0.4 * 200.0)  # the new, tighter 0.4-ATR trail
+    # The stop may RATCHET UP behind the peak -- that is risk reduction and is
+    # fine. What must NOT happen is it being floored at breakeven, which is
+    # what forces a winner out on the first pullback.
+    assert pos_after.stop_loss_price >= original_stop  # ratcheting up is allowed
+    assert pos_after.stop_loss_price < pos_before.entry_price  # but NOT to breakeven
+    # It must still sit a full stop-distance below the peak, not hug it.
+    assert (new_peak - pos_after.stop_loss_price) == pytest.approx(pos_before.stop_distance, rel=1e-6)
 
 
 @pytest.mark.asyncio
@@ -493,7 +511,8 @@ async def test_trailing_stop_tightens_as_long_position_moves_favorably():
     default is currently tuned to (see config.py)."""
     cache = _cache_with_book(bid=49_990, ask=50_010)
     settings = Settings(
-        delta_api_key="k", delta_api_secret="s", atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
+        delta_api_key="k", delta_api_secret="s", atr_stop_multiple=2.0,
+        atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
     )
     broker = PaperBroker(_registry(), cache, settings)
 
@@ -528,7 +547,8 @@ async def test_trailing_stop_never_loosens_when_price_pulls_back():
     tighter live default would no longer guarantee."""
     cache = _cache_with_book(bid=49_990, ask=50_010)
     settings = Settings(
-        delta_api_key="k", delta_api_secret="s", atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
+        delta_api_key="k", delta_api_secret="s", atr_stop_multiple=2.0,
+        atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
     )
     broker = PaperBroker(_registry(), cache, settings)
 
@@ -598,7 +618,8 @@ async def test_small_favorable_move_below_trigger_still_uses_wide_stop():
     the 150-point rally below is sized specifically to stay under it.
     """
     cache = _cache_with_book(bid=49_990, ask=50_010)
-    settings = Settings(delta_api_key="k", delta_api_secret="s", atr_breakeven_trigger_multiple=1.0)
+    settings = Settings(delta_api_key="k", delta_api_secret="s", atr_stop_multiple=2.0,
+                        atr_breakeven_trigger_multiple=1.0)
     broker = PaperBroker(_registry(), cache, settings)
 
     await broker.place_order(
@@ -627,7 +648,8 @@ async def test_fast_spike_short_of_take_profit_then_reversal_locks_in_real_profi
     """
     cache = _cache_with_book(bid=49_990, ask=50_010)
     settings = Settings(
-        delta_api_key="k", delta_api_secret="s", atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
+        delta_api_key="k", delta_api_secret="s", atr_stop_multiple=2.0,
+        atr_breakeven_trigger_multiple=1.0, atr_tightened_trail_multiple=0.8
     )
     broker = PaperBroker(_registry(), cache, settings)
 

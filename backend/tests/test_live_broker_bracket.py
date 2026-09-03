@@ -79,11 +79,16 @@ async def test_new_long_entry_from_flat_attaches_a_bracket_order():
     body = client.bracket_calls[0]
     assert body["product_id"] == 7
     assert body["product_symbol"] == "TESTUSD"
-    # Settings defaults: atr_stop_multiple=2.0, atr_take_profit_multiple=3.0.
-    # Long: stop = entry - 2*atr = 49_800, target = entry + 3*atr = 50_300.
-    assert body["stop_loss_order"]["stop_price"] == "49800"
-    assert body["stop_loss_order"]["trail_amount"] == "200"
-    assert body["take_profit_order"]["stop_price"] == "50300"
+    # Derived from Settings rather than hardcoded, so this keeps testing that
+    # the broker APPLIES the configured multiples rather than pinning whatever
+    # they happen to be today.
+    from app.config import get_settings
+    cfg = get_settings()
+    stop = 50_000.0 - cfg.atr_stop_multiple * 100.0
+    target = 50_000.0 + cfg.atr_take_profit_multiple * 100.0
+    assert body["stop_loss_order"]["stop_price"] == f"{stop:g}"
+    assert body["stop_loss_order"]["trail_amount"] == f"{cfg.atr_stop_multiple * 100.0:g}"
+    assert body["take_profit_order"]["stop_price"] == f"{target:g}"
     assert body["bracket_stop_trigger_method"] == "mark_price"
 
 
@@ -98,9 +103,13 @@ async def test_new_short_entry_computes_stop_above_and_target_below_entry():
 
     assert len(client.bracket_calls) == 1
     body = client.bracket_calls[0]
-    # Short: stop = entry + 2*atr = 50_200, target = entry - 3*atr = 49_700.
-    assert body["stop_loss_order"]["stop_price"] == "50200"
-    assert body["take_profit_order"]["stop_price"] == "49700"
+    # Mirror image of the long case, derived from Settings for the same reason.
+    from app.config import get_settings
+    cfg = get_settings()
+    stop = 50_000.0 + cfg.atr_stop_multiple * 100.0
+    target = 50_000.0 - cfg.atr_take_profit_multiple * 100.0
+    assert body["stop_loss_order"]["stop_price"] == f"{stop:g}"
+    assert body["take_profit_order"]["stop_price"] == f"{target:g}"
 
 
 @pytest.mark.asyncio

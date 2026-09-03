@@ -93,6 +93,7 @@ def test_trailing_stop_cannot_use_the_same_bars_high_it_is_then_tested_against()
     features = build_feature_frame(candles)
     cfg = BacktestConfig(
         starting_equity=10_000,
+        atr_stop_multiple=2.0,  # pinned: this test is about lookahead, not stop width
         atr_breakeven_trigger_multiple=0.2,  # deliberately hair-trigger
         atr_tightened_trail_multiple=0.15,
         slippage_bps=0.0,  # isolate the lookahead effect from slippage

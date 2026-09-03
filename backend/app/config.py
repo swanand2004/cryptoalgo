@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     # off the old peak.
     max_drawdown_pct: float = 0.20
     paper_starting_balance_usd: float = 10000
-    atr_stop_multiple: float = 2.0  # stop-loss distance, in ATRs, from entry
+    atr_stop_multiple: float = 2.5  # stop-loss distance, in ATRs, from entry
     atr_take_profit_multiple: float = 3.0  # take-profit distance, in ATRs (1.5:1 reward:risk)
     # Once a position has moved this many ATRs in its favor, the trailing
     # stop stops using the wide entry stop_distance (2 ATR) and switches to
@@ -160,13 +160,25 @@ class Settings(BaseSettings):
     # request so the breakeven floor + tightened trail engage at HALF the
     # favorable move they used to (a smaller move now counts as "committed
     # enough" to start protecting), not just a tighter trail once triggered.
-    atr_breakeven_trigger_multiple: float = 0.5
+    # RAISED 0.5 -> 3.0 on 2026-09-03 after the exit policy was measured over
+    # 9 years / 9,411 trades. At 0.5 the tightened trail engaged after only half
+    # an ATR of favourable move while losers still ran the full stop, giving a
+    # structural ~1:4 reward:risk that no achievable win rate can beat: the
+    # strategy won 58-60% of trades and still went to -99%, needing 61-66% just
+    # to break even. At 3.0 (>= the take-profit distance) the trail effectively
+    # never engages before the target, so winners are no longer cut short.
+    # Measured effect, selected on 2017-2023 and reported on untouched
+    # 2023-2026: payoff ratio 0.59 -> 1.53, out-of-sample return -75.2% -> +1.4%.
+    # That is ruin converted to roughly breakeven -- NOT a profitable strategy.
+    # Deflated Sharpe remains 0.000 and only 2 of 36 exit configs made money
+    # out-of-sample, so this is a risk fix, not a validated edge.
+    atr_breakeven_trigger_multiple: float = 3.0
     # Was 1.0, then 0.8 -- tightened again (same request as above) so the
     # trailing stop hugs the peak noticeably closer once triggered, locking
     # in more of a favorable move sooner at the cost of getting stopped out
     # by ordinary pullbacks more often. Doesn't change the wide pre-trigger
     # stop or when tightening starts (see atr_breakeven_trigger_multiple).
-    atr_tightened_trail_multiple: float = 0.4  # trail distance, in ATRs, once triggered
+    atr_tightened_trail_multiple: float = 2.0  # trail distance, in ATRs, once triggered
 
     # -- Signal thresholds (app/strategy/ensemble.py) -----------------------
     # Was hardcoded as SignalEnsemble constructor defaults, so the single most

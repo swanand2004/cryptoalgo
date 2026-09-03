@@ -23,10 +23,10 @@ class BacktestConfig:
     margin_per_trade_pct: float = 0.10
     # All 4 of these must mirror Settings' defaults, or the backtest
     # simulates a different protective mechanism than what live actually runs.
-    atr_stop_multiple: float = 2.0
+    atr_stop_multiple: float = 2.5
     atr_take_profit_multiple: float = 3.0
-    atr_breakeven_trigger_multiple: float = 0.5
-    atr_tightened_trail_multiple: float = 0.4
+    atr_breakeven_trigger_multiple: float = 3.0
+    atr_tightened_trail_multiple: float = 2.0
     min_leverage: float = 10.0
     max_leverage: float = 15.0
     # Regime-aware sizing. Default False here so every EXISTING backtest and
