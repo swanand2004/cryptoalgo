@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # only; the live path never reads it.
 BINANCE_SPOT_SYMBOL = {"BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT"}
 HISTORY_PREFIX = "BINANCE:"
+FUNDING_PREFIX = "BFUNDHIST:"
 
 # Binance kline interval codes for the resolutions this project uses.
 _INTERVAL = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
@@ -137,4 +138,88 @@ async def backfill_deep_history(
                 except Exception:
                     logger.exception("Deep-history backfill failed for %s %s", symbol, resolution)
                     counts[key] = 0
+    return counts
+
+
+# Binance USDM perpetual funding-rate HISTORY, back to 2019-09-10 for BTCUSDT.
+#
+# Needed because funding_carry was cut from the live lineup on evidence that
+# turned out to be invalid: it was evaluated against Delta's FUNDING: series,
+# which carries the PREMIUM INDEX rather than the funding rate (sign-inverted
+# and ~4x off -- see app/features/funding.py). The strategy has never had a
+# fair test against real funding, and testing it needs deep FUNDING history,
+# not just deep price history.
+#
+# Stored as BFUNDHIST:{symbol} to sit alongside BINANCE:{symbol} prices and
+# stay clear of both Delta's live series and the shallow BFUND: series the
+# hourly scheduler maintains.
+_FUNDING_PERP = {"BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT"}
+_FUNDING_START_MS = 1_567_000_000_000  # ~2019-08-28, before BTCUSDT perp listed
+
+
+async def fetch_binance_funding_history_deep(
+    binance_symbol: str,
+    start_ms: int = _FUNDING_START_MS,
+    client: httpx.AsyncClient | None = None,
+) -> list[dict]:
+    """Every funding settlement (8-hourly) from `start_ms` to now.
+
+    Returned in candle shape with the FRACTION converted to PERCENT, matching
+    how Delta quotes funding and how app/features/funding.py expects it --
+    the exact unit mismatch that made `funding_spread` meaningless until it
+    was fixed on 2026-09-03.
+    """
+    owns = client is None
+    client = client or httpx.AsyncClient(timeout=30.0)
+    out: list[dict] = []
+    cursor = start_ms
+    try:
+        while True:
+            resp = await client.get(
+                "https://fapi.binance.com/fapi/v1/fundingRate",
+                params={"symbol": binance_symbol, "startTime": cursor, "limit": 1000},
+            )
+            if resp.status_code == 429:
+                await asyncio.sleep(5.0)
+                continue
+            resp.raise_for_status()
+            rows = resp.json()
+            if not isinstance(rows, list) or not rows:
+                break
+            for r in rows:
+                pct = float(r["fundingRate"]) * 100.0  # fraction -> percent
+                t = int(r["fundingTime"]) // 1000
+                out.append({"time": t, "open": pct, "high": pct, "low": pct,
+                            "close": pct, "volume": 0.0})
+            last = int(rows[-1]["fundingTime"])
+            if last + 1 <= cursor:
+                break
+            cursor = last + 1
+            if len(rows) < 1000:
+                break
+            await asyncio.sleep(_SLEEP_BETWEEN_CALLS)
+    finally:
+        if owns:
+            await client.aclose()
+    return out
+
+
+async def backfill_deep_funding(symbols: list[str] | None = None) -> dict[str, int]:
+    symbols = symbols or list(_FUNDING_PERP)
+    counts: dict[str, int] = {}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for symbol in symbols:
+            perp = _FUNDING_PERP.get(symbol)
+            if perp is None:
+                continue
+            try:
+                rows = await fetch_binance_funding_history_deep(perp, client=client)
+                if rows:
+                    await upsert_candles(f"{FUNDING_PREFIX}{symbol}", "8h", rows)
+                counts[symbol] = len(rows)
+                span = (rows[-1]["time"] - rows[0]["time"]) / 86400 if rows else 0
+                logger.info("Backfilled %d %s funding settlements (%.0f days)", len(rows), symbol, span)
+            except Exception:
+                logger.exception("Deep funding backfill failed for %s", symbol)
+                counts[symbol] = 0
     return counts
