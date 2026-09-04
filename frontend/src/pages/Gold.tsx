@@ -334,67 +334,76 @@ function SignalDial({ score, action }: { score: number | null; action: 'BUY' | '
   )
 }
 
-/** Entry, stop and target laid out on a real price axis, so risk and reward
- * are compared by LENGTH rather than by reading two numbers and doing the
- * subtraction yourself. A 0.4x trade looks like a 0.4x trade here. */
+/** Stop, entry, current price and target on a real price axis, so risk and
+ * reward are compared by LENGTH rather than by reading two numbers and doing
+ * the subtraction. A 0.34x trade looks like a 0.34x trade.
+ *
+ * The current price is drawn as its own marker because entry is no longer
+ * always "here": when chasing pays badly the plan quotes the limit price that
+ * makes the ratio work, and the gap between NOW and THAT is the whole point. */
 function PriceLadder({ trade }: { trade: GoldTradePlan }) {
-  const { entry, stop_loss: stop, take_profit: tp } = trade
+  const { entry, stop_loss: stop, take_profit: tp, current_price: now } = trade
   if (entry == null || stop == null) return null
 
-  const long = trade.action === 'BUY'
-  const risk = Math.abs(entry - stop)
-  const reward = tp != null ? Math.abs(tp - entry) : 0
-  const span = Math.max(risk + reward, risk * 1.6) || 1
-  // Entry is placed so both legs are drawn to the same price scale.
-  const entryPos = long ? (risk / span) * 100 : 100 - (risk / span) * 100
-  const tpPos = tp == null ? null : long ? ((risk + reward) / span) * 100 : 100 - ((risk + reward) / span) * 100
-  const stopPos = long ? 0 : 100
+  const points = [stop, entry, ...(tp != null && !trade.model_conflict ? [tp] : []), ...(now != null ? [now] : [])]
+  const lo = Math.min(...points)
+  const hi = Math.max(...points)
+  const span = hi - lo || 1
+  const pad = span * 0.08
+  const place = (v: number) => ((v - (lo - pad)) / (span + pad * 2)) * 100
+
+  const riskLeft = Math.min(place(entry), place(stop))
+  const riskWidth = Math.abs(place(entry) - place(stop))
+  const rewardLeft = tp == null ? 0 : Math.min(place(entry), place(tp))
+  const rewardWidth = tp == null ? 0 : Math.abs(place(tp) - place(entry))
 
   const marks: { pos: number; label: string; value: number; color: string; strong?: boolean }[] = [
-    { pos: stopPos, label: 'STOP', value: stop, color: '#e2645f' },
-    { pos: entryPos, label: 'ENTRY', value: entry, color: '#e9e7e2', strong: true },
+    { pos: place(stop), label: 'stop', value: stop, color: '#e2645f' },
+    { pos: place(entry), label: trade.entry_type === 'limit' ? 'limit entry' : 'entry', value: entry, color: '#f2cd7a', strong: true },
   ]
-  if (tp != null && tpPos != null && !trade.model_conflict) {
-    marks.push({ pos: tpPos, label: 'TARGET', value: tp, color: '#4bb98a' })
-  }
-
-  const riskLeft = Math.min(entryPos, stopPos)
-  const riskWidth = Math.abs(entryPos - stopPos)
-  const rewardLeft = tpPos == null ? 0 : Math.min(entryPos, tpPos)
-  const rewardWidth = tpPos == null ? 0 : Math.abs(tpPos - entryPos)
+  if (tp != null && !trade.model_conflict) marks.push({ pos: place(tp), label: 'target', value: tp, color: '#4bb98a' })
 
   return (
     <div className="pt-1">
       <div className="relative h-2 w-full rounded-full bg-neutral-900 ring-1 ring-inset ring-neutral-800">
-        <div className="absolute inset-y-0 rounded-l-full bg-red-500/45"
-          style={{ left: `${riskLeft}%`, width: `${riskWidth}%` }} />
+        <div className="absolute inset-y-0 rounded-l-full bg-red-500/40" style={{ left: `${riskLeft}%`, width: `${riskWidth}%` }} />
         {rewardWidth > 0 && !trade.model_conflict && (
-          <div className="absolute inset-y-0 rounded-r-full bg-emerald-500/45"
-            style={{ left: `${rewardLeft}%`, width: `${rewardWidth}%` }} />
+          <div className="absolute inset-y-0 rounded-r-full bg-emerald-500/40" style={{ left: `${rewardLeft}%`, width: `${rewardWidth}%` }} />
         )}
         {marks.map((m) => (
           <div key={m.label} className="absolute -top-1 h-4 w-px" style={{ left: `${m.pos}%`, background: m.color }} />
         ))}
+        {now != null && (
+          <div
+            className="absolute -top-2.5 flex -translate-x-1/2 flex-col items-center"
+            style={{ left: `${place(now)}%` }}
+            title={`current price ${now}`}
+          >
+            <span className="text-[8px] leading-none text-neutral-300">&#9660;</span>
+          </div>
+        )}
       </div>
+
       <div className="relative mt-2 h-9">
         {marks.map((m) => (
-          <div
-            key={m.label}
-            className="absolute -translate-x-1/2 text-center"
-            style={{ left: `${Math.max(8, Math.min(92, m.pos))}%` }}
-          >
-            <div className="text-[8px] uppercase tracking-[0.14em]" style={{ color: m.color, opacity: 0.75 }}>
-              {m.label}
-            </div>
+          <div key={m.label} className="absolute -translate-x-1/2 text-center" style={{ left: `${Math.max(9, Math.min(91, m.pos))}%` }}>
+            <div className="text-[8px] uppercase tracking-[0.12em]" style={{ color: m.color, opacity: 0.8 }}>{m.label}</div>
             <div
-              className={`font-mono tabular-nums ${m.strong ? 'text-[13px] text-neutral-100' : 'text-[11px]'}`}
-              style={m.strong ? undefined : { color: m.color }}
+              className={`font-mono tabular-nums ${m.strong ? 'text-[13px]' : 'text-[11px]'}`}
+              style={{ color: m.strong ? '#f2cd7a' : m.color }}
             >
               {money(m.value)}
             </div>
           </div>
         ))}
       </div>
+
+      {now != null && trade.entry_type === 'limit' && (
+        <div className="mt-0.5 text-center text-[10px] text-neutral-500">
+          now {money(now)} &middot; entry is{' '}
+          <span className="font-mono tabular-nums text-amber-400">{signedPct(trade.entry_distance_pct)}</span> from here
+        </div>
+      )}
     </div>
   )
 }
@@ -711,6 +720,11 @@ function TradePlan({ trade }: { trade: GoldTradePlan | null | undefined }) {
         >
           {trade.viable ? 'takeable' : 'skip'}
         </span>
+        {trade.entry_type === 'limit' && (
+          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-amber-500/90">
+            wait for limit
+          </span>
+        )}
         <span className="ml-auto flex items-baseline gap-1.5">
           <span className="text-[9px] uppercase tracking-wider text-neutral-600">R:R</span>
           <span
@@ -718,23 +732,51 @@ function TradePlan({ trade }: { trade: GoldTradePlan | null | undefined }) {
           >
             {trade.risk_reward == null ? '--' : `${trade.risk_reward.toFixed(2)}x`}
           </span>
+          {/* What chasing costs, kept beside what waiting pays. */}
+          {trade.entry_type === 'limit' && trade.risk_reward_at_market != null && (
+            <span className="font-mono text-[10px] tabular-nums text-neutral-600 line-through">
+              {trade.risk_reward_at_market.toFixed(2)}x
+            </span>
+          )}
         </span>
       </div>
 
       <PriceLadder trade={trade} />
 
+      {/* Everything below is measured from the CURRENT price, because that is
+          where the reader is standing -- how far to the entry, how much of the
+          target is still on the table, how far the stop sits from here. */}
+      {!trade.model_conflict && trade.target_remaining_usd != null && (
+        <div className="mt-3 flex items-baseline justify-between rounded-md border border-neutral-800/70 bg-neutral-950/60 px-3 py-2">
+          <span className="text-[10px] uppercase tracking-[0.12em] text-neutral-500">Target left from here</span>
+          <span className="flex items-baseline gap-2">
+            <span className="font-mono text-base tabular-nums text-emerald-400">
+              {money(trade.target_remaining_usd)}
+            </span>
+            <span className="font-mono text-[11px] tabular-nums text-neutral-500">
+              {signedPct(trade.target_remaining_pct)}
+            </span>
+          </span>
+        </div>
+      )}
+
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[10px] text-neutral-600">
+        {trade.entry_type === 'limit' && (
+          <span>
+            To entry{' '}
+            <span className="font-mono tabular-nums text-amber-400">{signedPct(trade.entry_distance_pct)}</span>
+            {trade.entry_distance_atr != null && (
+              <span className="font-mono tabular-nums"> · {trade.entry_distance_atr.toFixed(1)} ATR</span>
+            )}
+            {trade.entry_reachable === false && <span className="text-amber-500"> · may not trade</span>}
+          </span>
+        )}
         <span>
           Stop <span className="font-mono tabular-nums text-neutral-400">{signedPct(trade.stop_distance_pct == null ? null : -trade.stop_distance_pct)}</span>
           {trade.stop_atr_multiple != null && (
             <span className="font-mono tabular-nums"> · {trade.stop_atr_multiple.toFixed(1)} ATR</span>
           )}
         </span>
-        {!trade.model_conflict && trade.target_distance_pct != null && (
-          <span>
-            Target <span className="font-mono tabular-nums text-neutral-400">{signedPct(trade.target_distance_pct)}</span>
-          </span>
-        )}
         {trade.structural_target != null && (
           <span>
             Structure <span className="font-mono tabular-nums text-neutral-500">{money(trade.structural_target)}</span>

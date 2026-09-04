@@ -33,6 +33,9 @@ from app.features.funding import (
 from app.features.indicators import add_all_indicators
 
 
+from app.features.microstructure import OHLCV_MICRO_COLUMNS, ohlcv_microstructure
+
+
 def build_feature_frame(
     candles: pd.DataFrame,
     funding: pd.DataFrame | None = None,
@@ -418,6 +421,8 @@ def build_feature_frame(
     # recent evidence on reliability, so tested rather than assumed here.
     df["weekly_expiry_proximity"] = weekly_expiry_proximity(times_utc)
 
+    df = ohlcv_microstructure(df)
+
     return df
 
 
@@ -472,6 +477,28 @@ FEATURE_COLUMNS = [
     # a real but not flawless win, not a spin-free clean sweep.
     "astro_all_pairs_aspect_score",
 ]
+
+# The microstructure columns ARE computed into every frame (see the call to
+# ohlcv_microstructure in build_feature_frame) but are deliberately NOT in
+# FEATURE_COLUMNS, so the crypto models do not train on them.
+#
+# Ablation on the deep Binance history, identical purged walk-forward folds,
+# 1h bars 4 ahead (backend/scripts/crypto_micro_ablation.py):
+#
+#     BTC  n=78,916   50.08% -> 49.93%   -0.14   inside the +-0.36 band
+#     ETH  n=78,916   48.60% -> 49.23%   +0.63   OUTSIDE -- helps
+#     SOL  n=52,862   50.32% -> 49.56%   -0.77   OUTSIDE -- hurts
+#
+# Helps one symbol, hurts another, does nothing on the third: scatter around
+# zero, not an improvement. Turning it on for all three on the strength of
+# ETH alone is precisely the cherry-pick this project has been bitten by
+# before, so the default is unchanged until there is cross-symbol evidence.
+#
+# They stay computed because they cost one pass over the frame, they are
+# available to rule-based strategies and to inspection, and the next ablation
+# should not have to re-derive them. FEATURE_COLUMNS_WITH_MICRO is what that
+# ablation trains on.
+FEATURE_COLUMNS_WITH_MICRO = FEATURE_COLUMNS + list(OHLCV_MICRO_COLUMNS)
 
 # fear_greed_z, funding_spread, binance_oi_change, binance_lsr_z, and
 # dvol_change are all computed above and available on every feature frame,

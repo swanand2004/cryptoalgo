@@ -17,6 +17,7 @@ from app.astro.panchang import (
     vara_lord_bias,
     yoga_severity,
 )
+from app.features.microstructure import ohlcv_microstructure
 from app.features.indicators import (
     adx,
     atr,
@@ -376,109 +377,6 @@ def _autocorrelation(returns: pd.Series, lag: int, window: int = 50) -> pd.Serie
     )
 
 
-def _microstructure_features(out: pd.DataFrame) -> pd.DataFrame:
-    """OHLCV-only microstructure estimators.
-
-    Every one of these is defined for a market observed as bars rather than as
-    a book. They are NOT approximations of order-flow imbalance dressed up
-    under a nicer name -- each is the published estimator for the quantity it
-    claims to measure, computed from the inputs it was designed for.
-
-    Volume is genuinely optional: PAXG/USDT carries real Binance volume, but
-    the frame is also built for sources that do not, so the volume-dependent
-    columns degrade to a constant rather than raising.
-    """
-    o, h, l, c = (out[k].astype(float) for k in ("open", "high", "low", "close"))
-    ret = np.log(c.replace(0, np.nan)).diff()
-    rng = (h - l).replace(0, np.nan)
-
-    # Volume is genuinely OPTIONAL here, and that has to be handled by giving
-    # the volume-dependent columns a defined neutral value rather than by
-    # letting NaN propagate. This function is called from
-    # build_gold_feature_frame, whose stated contract is that only
-    # time/open/high/low/close are required -- and a column that is entirely
-    # NaN does not merely lose itself, it removes every row from the training
-    # matrix, because build_gold_training_frame keeps only rows where ALL
-    # features are present. One optional input silently zeroing the whole
-    # dataset is a much worse failure than not having volume.
-    #
-    # Zero is the correct neutral: no observable flow imbalance, no measurable
-    # price impact. It says "no information", not "no activity".
-    v = out["volume"].astype(float) if "volume" in out.columns else pd.Series(0.0, index=out.index)
-    volume_usable = bool(v.replace(0, np.nan).notna().any())
-
-    # Corwin & Schultz (2012). Two-bar high-low ratios separate spread from
-    # volatility: volatility scales with the interval, the spread does not.
-    beta = (np.log((h / l).replace(0, np.nan)) ** 2).rolling(2).sum()
-    gamma = np.log((h.rolling(2).max() / l.rolling(2).min()).replace(0, np.nan)) ** 2
-    k = 3 - 2 * np.sqrt(2)
-    alpha = (np.sqrt(2 * beta) - np.sqrt(beta)) / k - np.sqrt(gamma / k)
-    out["micro_cs_spread"] = (2 * (np.exp(alpha) - 1) / (1 + np.exp(alpha))).clip(lower=0).rolling(24).mean()
-
-    # Roll (1984). Bid-ask bounce makes consecutive price changes negatively
-    # autocovariant, and the spread falls out of that covariance.
-    dp = c.diff()
-    out["micro_roll_spread"] = 2 * np.sqrt((-dp.rolling(48).cov(dp.shift(1))).clip(lower=0))
-
-    if volume_usable:
-        # Amihud (2002): price move per unit of volume -- the cost of pushing it.
-        out["micro_amihud"] = (ret.abs() / v.replace(0, np.nan)).rolling(24).mean()
-
-        # Kyle-lambda proxy: move regressed on SIGNED volume, so it measures
-        # directional impact rather than Amihud's undirected cost. A window
-        # with no dispersion in signed flow has no measurable impact, which is
-        # a reading of zero rather than a missing value.
-        signed_vol = np.sign(ret) * v
-        out["micro_kyle_lambda"] = (
-            ret.rolling(48).cov(signed_vol) / signed_vol.rolling(48).var().replace(0, np.nan)
-        ).fillna(0.0)
-
-        # Tick rule. With no trade-level data the bar's own direction is the
-        # standard stand-in for aggressor side -- a proxy for flow, not flow.
-        out["micro_signed_flow"] = (
-            signed_vol.rolling(24).sum() / v.rolling(24).sum().replace(0, np.nan)
-        ).fillna(0.0)
-        out["micro_volume_shock"] = np.log(
-            (v / v.rolling(96).median().replace(0, np.nan)).replace(0, np.nan)
-        ).fillna(0.0)
-    else:
-        for name in ("micro_amihud", "micro_kyle_lambda", "micro_signed_flow", "micro_volume_shock"):
-            out[name] = 0.0
-
-    # Intrabar pressure.
-    out["micro_close_location"] = ((c - l) - (h - c)) / rng
-    out["micro_wick_asymmetry"] = ((h - np.maximum(o, c)) - (np.minimum(o, c) - l)) / rng
-    out["micro_body_ratio"] = (c - o).abs() / rng
-
-    # Lag-1 autocorrelation: negative is bid-ask bounce, positive is genuine
-    # short-horizon momentum. The sign distinguishes the two regimes.
-    out["micro_ret_autocorr"] = ret.rolling(96).corr(ret.shift(1))
-    out["micro_vol_of_vol"] = ret.rolling(24).std().rolling(96).std()
-
-    # Realized variance vs bipower variation -- the gap is jump activity,
-    # which a continuous-diffusion view mis-prices.
-    rv = (ret**2).rolling(24).sum()
-    bpv = (ret.abs() * ret.abs().shift(1)).rolling(24).sum() * (np.pi / 2)
-    out["micro_jump_ratio"] = (rv - bpv) / rv.replace(0, np.nan)
-
-    for name in (
-        "micro_cs_spread",
-        "micro_roll_spread",
-        "micro_amihud",
-        "micro_kyle_lambda",
-        "micro_signed_flow",
-        "micro_volume_shock",
-        "micro_close_location",
-        "micro_wick_asymmetry",
-        "micro_body_ratio",
-        "micro_ret_autocorr",
-        "micro_vol_of_vol",
-        "micro_jump_ratio",
-    ):
-        out[name] = out[name].replace([np.inf, -np.inf], np.nan)
-    return out
-
-
 def build_gold_feature_frame(candles: pd.DataFrame) -> pd.DataFrame:
     """Builds gold's own research feature bank from raw OHLCV candles (only
     `time`/`open`/`high`/`low`/`close` are required -- PAXG/USDT's real
@@ -576,7 +474,7 @@ def build_gold_feature_frame(candles: pd.DataFrame) -> pd.DataFrame:
         out["macro_nearest_is_nfp"],
     ) = macro_event_proximity(times_utc)
 
-    out = _microstructure_features(out)
+    out = ohlcv_microstructure(out)
     out = _deep_analysis_layers(out)
 
     return out

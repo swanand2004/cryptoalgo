@@ -179,45 +179,73 @@ TRADE_STOP_ATR = 2.0
 TRADE_MAX_STOP_ATR = 3.0
 # Slack beyond a structural level, so an obvious wick does not take the stop.
 TRADE_STRUCTURE_BUFFER_ATR = 0.25
-# Below this the stop costs more than the model's own target pays.
-MIN_VIABLE_RR = 1.0
+# The ratio a limit entry is priced to achieve.
+TARGET_RR = 2.0
+# Below this the trade is not worth taking at all.
+MIN_VIABLE_RR = 1.5
+# A limit further than this from the current price is a level that may simply
+# never trade before the forecast expires.
+MAX_ENTRY_DISTANCE_ATR = 1.5
+
+
+def _entry_for_rr(target: float, stop: float, rr: float, long_side: bool) -> float:
+    """The entry price at which this stop and this target give exactly `rr`.
+
+    Stop and target are LEVELS, fixed by structure and by the model. Only the
+    entry is a choice, and moving it toward the stop shrinks risk and grows
+    reward at the same time:
+
+        rr = (target - entry) / (entry - stop)          [long]
+        =>  entry = (target + rr * stop) / (1 + rr)
+
+    This is why "the ratio is bad" and "the trade is bad" are different
+    statements. A 0.4x setup at market is often a 2x setup on a pullback, and
+    the useful output is the price that makes it one -- not a refusal, and
+    certainly not a better-looking target.
+    """
+    return (target + rr * stop) / (1.0 + rr)
 
 
 def _trade_plan(levels: dict, action: str, price: float | None,
                 target_price: float | None, conviction: float = 1.0) -> dict:
-    """Entry / stop / target for the call, plus whether it is worth taking.
+    """Entry / stop / target for the call, and what it is worth from here.
 
-    The take-profit is the MODEL'S OWN predicted price, not a structural
-    level that happens to give a flattering ratio. That distinction is the
-    whole point: resistance is where price might go, the model target is
-    where this model says it goes, and only the second one has a measured
-    track record attached. The structural level is returned alongside as
-    context, clearly named, never substituted in when the model's number is
-    unimpressive.
+    The take-profit is the MODEL'S OWN predicted price, not a structural level
+    that happens to give a flattering ratio. Resistance is where price might
+    go; the model target is where this model says it goes, and only the second
+    has a measured track record. Structure is returned alongside, named as
+    context, and never substituted in when the model's number is unimpressive.
 
-    Consequences of that choice are reported rather than hidden:
-      - risk_reward below 1 means the 2-ATR stop costs more than the model's
-        own target pays. The plan is still returned, marked not viable.
-      - the gated score and the raw return regression can disagree (score
-        says BUY, predicted return is negative). That is a real conflict
-        inside the model and is surfaced, not resolved by quietly flipping
-        one of them.
+    Because the target is fixed and the stop is fixed, the ENTRY is the only
+    free variable -- so when market entry does not clear MIN_VIABLE_RR the plan
+    reports the limit price that reaches TARGET_RR instead of just refusing.
+    Everything is also measured from the CURRENT price, because that is where
+    the reader actually is: how far to the entry, how much of the target is
+    still left, how far the stop sits.
 
-    HOLD returns no entry -- there is no position -- but keeps the two levels
-    whose breach would START a trade, which is the actionable part of a
-    no-trade call.
+    Reported rather than hidden:
+      - risk_reward at market, alongside the ratio at the suggested entry, so
+        the cost of chasing is visible
+      - a limit further than MAX_ENTRY_DISTANCE_ATR away, flagged as possibly
+        never trading before the forecast expires
+      - the gated classifier and the return regression disagreeing (score says
+        BUY, predicted return is negative) -- a real conflict inside the model,
+        surfaced instead of resolved by quietly flipping one of them
+
+    HOLD returns no entry but keeps the two levels whose breach would START a
+    trade, which is the actionable part of a no-trade call.
     """
     atr = levels.get("atr")
     support, resistance = levels.get("support"), levels.get("resistance")
     if price is None or not atr or atr <= 0:
         return {"action": "HOLD", "viable": False, "entry": None, "stop_loss": None,
-                "take_profit": None, "risk_reward": None,
+                "take_profit": None, "risk_reward": None, "current_price": _clean(price),
                 "note": "no ATR available -- cannot place a stop honestly"}
 
     if action == "HOLD":
         return {
             "action": "HOLD", "viable": False, "entry": None, "stop_loss": None,
-            "take_profit": None, "risk_reward": None,
+            "take_profit": None, "risk_reward": None, "current_price": _clean(price),
             "trigger_long_above": _clean(resistance) if resistance else None,
             "trigger_short_below": _clean(support) if support else None,
             "note": "no position -- a close beyond either level is what would start one",
@@ -229,55 +257,103 @@ def _trade_plan(levels: dict, action: str, price: float | None,
 
     stop = price - direction * TRADE_STOP_ATR * atr
     structure_used = False
-    # If the structural level sits just beyond the ATR stop, the stop is
-    # sitting exactly where a wick would run it. Step past the level instead.
+    # A stop parked exactly on an obvious level is where a wick takes it out
+    # and the trade then works without you. Step past the level instead.
     if structure_stop_level is not None:
         beyond = (structure_stop_level < stop) if long_side else (structure_stop_level > stop)
         if beyond and abs(stop - structure_stop_level) <= 0.5 * atr:
             stop = structure_stop_level - direction * TRADE_STRUCTURE_BUFFER_ATR * atr
             structure_used = True
-    # Cap, applied after the structural adjustment so it binds either path.
     cap = price - direction * TRADE_MAX_STOP_ATR * atr
     stop = max(stop, cap) if long_side else min(stop, cap)
 
-    risk = abs(price - stop)
     take_profit = target_price
-    reward = (take_profit - price) * direction if take_profit is not None else None
+    reward_at_market = (take_profit - price) * direction if take_profit is not None else None
+    conflict = take_profit is not None and reward_at_market is not None and reward_at_market <= 0
 
-    conflict = take_profit is not None and reward is not None and reward <= 0
+    risk_at_market = abs(price - stop)
+    rr_at_market = (
+        reward_at_market / risk_at_market
+        if (reward_at_market is not None and reward_at_market > 0 and risk_at_market > 0)
+        else None
+    )
+
+    # --- pick the entry ---------------------------------------------------
+    entry, entry_type, limit_entry = price, "market", None
+    if take_profit is not None and not conflict:
+        if rr_at_market is not None and rr_at_market >= MIN_VIABLE_RR:
+            entry, entry_type = price, "market"
+        else:
+            candidate = _entry_for_rr(take_profit, stop, TARGET_RR, long_side)
+            # Only meaningful if it is actually a BETTER price than market and
+            # still on the right side of the stop.
+            better = (candidate < price) if long_side else (candidate > price)
+            valid = (candidate > stop) if long_side else (candidate < stop)
+            if better and valid:
+                entry, entry_type, limit_entry = candidate, "limit", candidate
+
+    risk = abs(entry - stop)
+    reward = (take_profit - entry) * direction if take_profit is not None else None
     rr = (reward / risk) if (reward is not None and reward > 0 and risk > 0) else None
+
+    entry_distance_pct = (entry - price) / price * 100
+    entry_distance_atr = abs(entry - price) / atr
+    reachable = entry_distance_atr <= MAX_ENTRY_DISTANCE_ATR
+
     structural_target = resistance if long_side else support
     structural_reward = ((structural_target - price) * direction) if structural_target else None
+
+    # --- what is left from HERE -------------------------------------------
+    target_remaining = ((take_profit - price) * direction) if take_profit is not None else None
+    target_remaining_pct = (
+        abs(take_profit - price) / price * 100 if take_profit is not None else None
+    )
+    stop_distance_from_here_pct = abs(price - stop) / price * 100
 
     if conflict:
         note = ("the model's predicted price sits AGAINST its own signal -- the classifier "
                 "and the return regression disagree, so there is no honest target here")
     elif rr is None:
         note = "no model target available"
-    elif rr < MIN_VIABLE_RR:
-        note = (f"target pays {rr:.2f}x what the stop risks -- the model's own predicted move "
-                f"does not cover a {TRADE_STOP_ATR:.0f}-ATR stop")
+    elif entry_type == "limit" and not reachable:
+        note = (f"only worth {TARGET_RR:.1f}x at {entry:,.2f}, which is {entry_distance_atr:.1f} ATR "
+                f"away -- that level may not trade before the call expires")
+    elif entry_type == "limit":
+        note = (f"chasing here pays {rr_at_market:.2f}x; waiting for {entry:,.2f} "
+                f"({entry_distance_pct:+.2f}%) pays {rr:.2f}x")
     else:
-        note = f"target pays {rr:.2f}x the risk"
+        note = f"market entry already pays {rr:.2f}x the risk"
     if structure_used:
         note += "; stop placed beyond structure rather than on the flat ATR line"
 
     return {
         "action": action,
-        "viable": bool(rr is not None and rr >= MIN_VIABLE_RR),
-        "entry": _clean(price),
+        "viable": bool(rr is not None and rr >= MIN_VIABLE_RR and reachable),
+        "current_price": _clean(price),
+        "entry": _clean(entry),
+        "entry_type": entry_type,
+        "limit_entry": _clean(limit_entry) if limit_entry is not None else None,
+        "entry_distance_pct": _clean(entry_distance_pct),
+        "entry_distance_atr": _clean(entry_distance_atr),
+        "entry_reachable": bool(reachable),
         "stop_loss": _clean(stop),
         "take_profit": _clean(take_profit) if take_profit is not None else None,
         "risk_per_unit": _clean(risk),
         "reward_per_unit": _clean(reward) if reward is not None else None,
         "risk_reward": _clean(rr) if rr is not None else None,
-        "stop_distance_pct": _clean(risk / price * 100),
-        "target_distance_pct": _clean(abs(take_profit - price) / price * 100) if take_profit else None,
-        "stop_atr_multiple": _clean(risk / atr),
+        "risk_reward_at_market": _clean(rr_at_market) if rr_at_market is not None else None,
+        "target_rr": TARGET_RR,
+        "min_viable_rr": MIN_VIABLE_RR,
+        # Measured from where the reader actually is: the current price.
+        "target_remaining_usd": _clean(target_remaining) if target_remaining is not None else None,
+        "target_remaining_pct": _clean(target_remaining_pct) if target_remaining_pct is not None else None,
+        "stop_distance_pct": _clean(stop_distance_from_here_pct),
+        "stop_atr_multiple": _clean(abs(price - stop) / atr),
+        "atr": _clean(atr),
         # Structure shown as CONTEXT. Not the take-profit, on purpose.
         "structural_target": _clean(structural_target) if structural_target else None,
-        "structural_risk_reward": _clean(structural_reward / risk)
-            if (structural_reward is not None and structural_reward > 0 and risk > 0) else None,
+        "structural_risk_reward": _clean(structural_reward / risk_at_market)
+            if (structural_reward is not None and structural_reward > 0 and risk_at_market > 0) else None,
         # Conviction sizes the trade; it never moves entry, stop or target.
         "size_multiplier": _clean(max(0.0, min(1.0, conviction))),
         "model_conflict": bool(conflict),

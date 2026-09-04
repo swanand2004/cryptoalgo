@@ -161,15 +161,26 @@ export interface GoldLevels {
 export interface GoldTradePlan {
   action: 'BUY' | 'SELL' | 'HOLD'
   viable: boolean
+  current_price: number | null
   entry: number | null
+  entry_type?: 'market' | 'limit'
+  limit_entry?: number | null
+  entry_distance_pct?: number | null
+  entry_distance_atr?: number | null
+  entry_reachable?: boolean
   stop_loss: number | null
   take_profit: number | null
   risk_per_unit?: number | null
   reward_per_unit?: number | null
   risk_reward: number | null
+  risk_reward_at_market?: number | null
+  target_rr?: number
+  min_viable_rr?: number
+  target_remaining_usd?: number | null
+  target_remaining_pct?: number | null
   stop_distance_pct?: number | null
-  target_distance_pct?: number | null
   stop_atr_multiple?: number | null
+  atr?: number | null
   structural_target?: number | null
   structural_risk_reward?: number | null
   size_multiplier?: number | null
