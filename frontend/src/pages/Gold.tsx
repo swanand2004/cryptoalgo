@@ -399,49 +399,67 @@ function PriceLadder({ trade }: { trade: GoldTradePlan }) {
   )
 }
 
-/** Measured accuracy against the coin flip, with the noise band drawn.
+/** Measured accuracy against the bar that actually matters.
  *
- * This is the most important honest element on the page. Every signal here
- * sits within a couple of points of 50%, and a bare "51.3%" reads as an edge
- * to almost anyone. Drawing the +-2 sigma band makes the actual claim visible:
- * if the marker is inside the shaded zone, the number is indistinguishable
- * from a coin flip and no amount of presentation changes that. */
-function AccuracyStrip({ accuracy, samples }: { accuracy: number | null; samples: number | null }) {
+ * Not 50%. Gold drifts up, so a coin flip is the wrong reference: over the
+ * training sample 51-55% of moved bars closed higher, which means a model
+ * scoring 52% is worse than doing nothing while looking like an edge. The
+ * marker is placed against the LONG-ONLY baseline, with the +-2 sigma band
+ * drawn around it, so "beats holding gold" is what the picture answers.
+ *
+ * The accuracy itself now excludes flat bars. PAXG prints 10.7% exactly-zero
+ * 4-bar returns at 15m; counting those as errors understated this model by
+ * about ten points and made a 55.8% model read as a 50.9% coin flip. */
+function AccuracyStrip({
+  accuracy,
+  samples,
+  baseline,
+}: {
+  accuracy: number | null
+  samples: number | null
+  baseline: number | null
+}) {
   if (accuracy == null || !samples) return null
   const pct = accuracy * 100
+  const base = baseline != null ? baseline * 100 : 50
   const bandPts = (50 / Math.sqrt(samples)) * 2
-  const LO = 42
-  const HI = 58
-  const place = (v: number) => ((Math.max(LO, Math.min(HI, v)) - LO) / (HI - LO)) * 100
-  const inNoise = Math.abs(pct - 50) < bandPts
-  const color = inNoise ? '#8b8578' : pct > 50 ? '#4bb98a' : '#e2645f'
+  const lo = Math.min(pct, base) - Math.max(3, bandPts * 2)
+  const hi = Math.max(pct, base) + Math.max(3, bandPts * 2)
+  const place = (v: number) => ((Math.max(lo, Math.min(hi, v)) - lo) / (hi - lo)) * 100
+  const edge = pct - base
+  const beats = edge > bandPts
+  const color = beats ? '#4bb98a' : Math.abs(edge) <= bandPts ? '#8b8578' : '#e2645f'
 
   return (
     <div>
       <div className="mb-1.5 flex items-baseline justify-between">
-        <span className="text-[9px] uppercase tracking-[0.16em] text-neutral-500">Measured accuracy</span>
+        <span className="text-[9px] uppercase tracking-[0.16em] text-neutral-500">vs holding gold</span>
         <span className="font-mono text-[11px] tabular-nums" style={{ color }}>
-          {pct.toFixed(1)}% <span className="text-neutral-600">&plusmn;{bandPts.toFixed(1)}</span>
+          {edge >= 0 ? '+' : ''}
+          {edge.toFixed(1)} <span className="text-neutral-600">&plusmn;{bandPts.toFixed(1)}</span>
         </span>
       </div>
       <div className="relative h-5 w-full overflow-hidden rounded bg-neutral-900 ring-1 ring-inset ring-neutral-800">
-        {/* the band inside which this measurement is a coin flip */}
         <div
           className="absolute inset-y-0 bg-neutral-700/25"
-          style={{ left: `${place(50 - bandPts)}%`, width: `${place(50 + bandPts) - place(50 - bandPts)}%` }}
+          style={{ left: `${place(base - bandPts)}%`, width: `${place(base + bandPts) - place(base - bandPts)}%` }}
         />
-        <div className="absolute inset-y-0 w-px bg-neutral-500" style={{ left: `${place(50)}%` }} />
+        <div className="absolute inset-y-0 w-px bg-neutral-500" style={{ left: `${place(base)}%` }} />
         <div
           className="absolute top-1/2 h-3 w-[3px] -translate-y-1/2 rounded-full transition-all duration-700"
           style={{ left: `${place(pct)}%`, background: color, boxShadow: `0 0 10px ${color}` }}
         />
-        <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[8px] text-neutral-700">{LO}%</span>
-        <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[8px] text-neutral-700">{HI}%</span>
+      </div>
+      <div className="mt-1 flex justify-between font-mono text-[9px] tabular-nums text-neutral-600">
+        <span>model {pct.toFixed(1)}%</span>
+        <span>long-only {base.toFixed(1)}%</span>
       </div>
       <div className="mt-1 text-[10px] leading-snug text-neutral-600">
-        {inNoise
-          ? `Inside the noise band on ${samples.toLocaleString()} walk-forward samples -- not distinguishable from a coin flip.`
-          : `Outside the noise band on ${samples.toLocaleString()} walk-forward samples.`}
+        {beats
+          ? `Beats holding by ${edge.toFixed(1)} points on ${samples.toLocaleString()} walk-forward samples.`
+          : Math.abs(edge) <= bandPts
+          ? `Indistinguishable from holding gold on ${samples.toLocaleString()} samples.`
+          : `WORSE than simply holding gold, by ${Math.abs(edge).toFixed(1)} points.`}
       </div>
     </div>
   )
@@ -558,8 +576,11 @@ function FactorTable({ blend }: { blend: GoldBlend }) {
           ))}
         </div>
         <p className="mt-2.5 text-[10px] leading-relaxed text-neutral-600">
-          Micro never votes on direction. On 52,586 hourly bars nothing beat gold&rsquo;s own 45.3% up-hour
-          baseline, so without an order book there is micro risk here but no micro alpha.
+          Micro never votes on direction here. Thirteen factors (Roll, Corwin-Schultz, Amihud, Kyle-lambda,
+          intrabar pressure) were tested on 128k 15m bars with a three-way split: the best decays 59.7% &rarr;
+          55.8% &rarr; 50.8%, and every combination lands at 50&ndash;51% against a long-only baseline of
+          51.5&ndash;56.2%. Gold drifts, so a hand-weighted micro vote is worse than holding. The factors are
+          fed to the model instead, where a tree can look for conditional structure.
         </p>
       </div>
     </div>
@@ -773,6 +794,7 @@ function HorizonConsole({
             <AccuracyStrip
               accuracy={prediction.mean_directional_accuracy}
               samples={prediction.n_samples}
+              baseline={prediction.long_only_baseline}
             />
           </div>
         </div>

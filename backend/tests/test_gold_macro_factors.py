@@ -152,10 +152,15 @@ def test_a_missing_model_score_is_treated_as_no_opinion():
 # --- micro factors: conviction scaling, never a directional vote ----------
 
 def test_micro_factors_never_vote_on_direction():
-    """Measured 2026-09-04 on 52,586 hourly bars: vol term structure came in
-    at 44.5-48.6%, below 50% at every horizon with its committed sign, and no
-    session or fix window differed from gold's 45.3% unconditional up-rate.
-    Without an order book there is micro RISK here but no micro ALPHA."""
+    """Re-measured 2026-09-04 on 128,213 15m and 52,587 hourly bars, with flat
+    bars excluded (PAXG prints 10.7% exactly-zero 4-bar returns at 15m;
+    counting them made every factor look ~10 points worse than it was) and a
+    three-way TRAIN/VALIDATION/TEST split. Thirteen factors including Roll,
+    Corwin-Schultz, Amihud and a Kyle-lambda proxy. The best of them decays
+    59.7% -> 55.8% -> 50.8%, and every hand-built combination lands at 50-51%
+    on test against a long-only baseline of 51.5-56.2%. Gold drifts, so a
+    hand-weighted micro vote is worse than holding. They are wired into the
+    model's feature bank instead; here they scale conviction only."""
     import numpy as np
 
     from app.gold.micro_factors import MICRO_DIRECTIONAL_FACTORS, compute_micro_factors, directional_score

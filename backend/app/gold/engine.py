@@ -71,12 +71,15 @@ def _load_report_summary(horizon: str) -> dict:
     """
     report_path = GOLD_MODEL_STORE_DIR / f"gold_{horizon}_latest_report.json"
     if not report_path.exists():
-        return {"n_samples": None, "mean_directional_accuracy": None, "mean_information_coefficient": None}
+        return {"n_samples": None, "mean_directional_accuracy": None,
+                "mean_information_coefficient": None, "long_only_baseline": None}
     report = json.loads(report_path.read_text())
     return {
         "n_samples": report.get("n_samples"),
         "mean_directional_accuracy": report.get("mean_directional_accuracy"),
         "mean_information_coefficient": report.get("mean_information_coefficient"),
+        # Gold drifts, so a model is only informative relative to holding it.
+        "long_only_baseline": report.get("long_only_baseline"),
     }
 
 

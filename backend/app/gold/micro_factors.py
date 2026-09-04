@@ -36,31 +36,48 @@ from app.gold.macro_calendar import next_macro_event
 # Collapsing those two into one number is how a risk gate silently becomes a
 # fake alpha signal, so they are returned separately.
 #
-# MEASURED 2026-09-04 on 52,586 hourly PAXG bars (2020-08 -> 2026-09),
-# trailing z-scores, forward returns, 2-sigma noise band +-0.44 points:
+# MEASURED, then RE-measured after finding a bug in the first measurement.
 #
-#   vol_term_structure, sign committed +1 beforehand:
-#       1h 44.5%   4h 47.0%   12h 47.9%   24h 48.2%   72h 48.6%
-#   Below 50% at EVERY horizon. The committed sign is wrong in this sample.
-#   It is therefore NOT promoted to a vote -- and deliberately not flipped
-#   to fit, which would be choosing the sign from the data.
+# The first pass reported vol_term_structure at 44.5-48.6% and gold's hourly
+# up-rate at 45.3%, and concluded "below 50% everywhere, therefore no edge".
+# Those numbers were wrong. PAXG is thinly traded and prints a lot of exactly
+# flat bars -- 10.7% of 15m bars have a zero 4-bar forward return, 7.2% of
+# hourly bars have a zero 1-bar return. np.sign(0) is 0, so a flat bar counted
+# as WRONG for a signal and for its exact opposite at the same time, which
+# subtracted a near-constant offset from every figure and quietly moved the
+# coin-flip line from 50% down to ~46%. Comparing to 50% under those
+# conditions was meaningless. Corrected, gold's up-rate is 51-52%, not 45.3%,
+# and vol_term_structure is ~50%: flat, not negative.
 #
-#   Session / fix windows, share of UP bars. The right baseline here is NOT
-#   50%: gold's unconditional up-hour rate over this sample is 45.3%, so a
-#   window is only informative if it differs from THAT.
-#              1h     4h    12h    24h    72h
-#       asia  44.5   47.8   49.9   50.3   53.5
-#     london  45.6   47.7   48.7   50.5   53.2
-#      comex  45.6   48.1   50.5   51.8   53.2
-#        off  45.9   49.5   51.6   50.8   52.4
-#    near fix 45.7   46.9   49.7   51.6   52.8
-#   Every window sits within ~1 point of the 45.3% baseline and of each
-#   other. The uniform ~53% at 72h is just gold's drift over 2020-2026, not
-#   a session effect -- it appears identically in all five rows.
+# RE-MEASURED 2026-09-04 excluding flat bars, on 128,213 15m bars and 52,587
+# hourly bars, with a three-way chronological split -- sign fixed on TRAIN,
+# factors selected on VALIDATION, TEST read exactly once. Thirteen factors,
+# including the estimators built for exactly this situation (Roll 1984
+# serial-covariance spread, Corwin-Schultz 2012 high-low spread, Amihud 2002
+# illiquidity, a Kyle-lambda impact proxy) -- the first pass had skipped that
+# literature on the grounds that there was no order book, which was the wrong
+# reason to skip it.
 #
-# NET RESULT: the micro side contributes NO directional vote. Everything it
-# produces is conviction scaling. That is a real finding, not a placeholder:
-# without an order book there is no micro ALPHA here, only micro RISK.
+# The strongest factor, close_location (where in its own range the bar shut),
+# decays exactly the way a lucky factor does:
+#     15m, 4 bars ahead:   TRAIN 59.7%  ->  VALID 55.8%  ->  TEST 50.8%
+# Every hand-built combination behaves the same: 53-55% on validation, 50-51%
+# on test.
+#
+# And the number that settles it -- TEST accuracy against simply being long:
+#     15m/4    combo 50.5%   long-only 51.5%
+#     15m/24   combo 50.8%   long-only 52.5%
+#     1h/24    combo 51.3%   long-only 55.1%
+#     1h/72    combo 50.3%   long-only 56.2%
+# Gold drifts up. Every hand-weighted micro combination is WORSE than holding,
+# and the gap widens with horizon. 50% was never the right bar.
+#
+# NET RESULT: still no directional vote from a hand-weighted micro combination
+# -- but now for a measured reason rather than a mistaken one. The factors
+# themselves are not worthless: they are wired into the MODEL's feature bank
+# (see features.py, micro_* columns) where a tree can look for conditional
+# structure, which is a different question from whether a fixed linear
+# combination of them predicts direction. Here they scale conviction only.
 MICRO_DIRECTIONAL_FACTORS: tuple[str, ...] = ()
 
 # Gold's trading day, in UTC. Asia is the physical-demand session (China,

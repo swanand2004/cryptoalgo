@@ -231,6 +231,7 @@ export interface GoldPrediction {
   n_samples: number | null
   mean_directional_accuracy: number | null
   mean_information_coefficient: number | null
+  long_only_baseline: number | null
   risk_level: 'low' | 'medium' | 'high' | 'very_high'
   risk_reason: string
 }
