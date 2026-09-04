@@ -158,6 +158,27 @@ export interface GoldLevels {
   distance_to_breakdown_pct: number | null
 }
 
+export interface GoldTradePlan {
+  action: 'BUY' | 'SELL' | 'HOLD'
+  viable: boolean
+  entry: number | null
+  stop_loss: number | null
+  take_profit: number | null
+  risk_per_unit?: number | null
+  reward_per_unit?: number | null
+  risk_reward: number | null
+  stop_distance_pct?: number | null
+  target_distance_pct?: number | null
+  stop_atr_multiple?: number | null
+  structural_target?: number | null
+  structural_risk_reward?: number | null
+  size_multiplier?: number | null
+  model_conflict?: boolean
+  trigger_long_above?: number | null
+  trigger_short_below?: number | null
+  note: string
+}
+
 export interface GoldMacroFactor {
   name: string
   raw_value: number | null
@@ -197,6 +218,7 @@ export interface GoldBlend {
 
 export interface GoldPrediction {
   levels?: GoldLevels
+  trade?: GoldTradePlan | null
   blend?: GoldBlend | null
   score: number | null
   decidable: boolean

@@ -258,6 +258,155 @@ function cryptoConfirmation(
   return total > 0 ? { agree, disagree, total } : null
 }
 
+/** Entry / stop / target, and whether the trade is actually worth taking.
+ *
+ * The take-profit is the MODEL'S predicted price, never a structural level
+ * picked because it flatters the ratio -- resistance is where price might go,
+ * the model target is where this model says it goes, and only the second has
+ * a measured track record. When that target does not cover a 2-ATR stop the
+ * card says so and marks the plan not viable rather than quietly swapping in
+ * a nicer number. A plan you should not take is more useful than a plan
+ * dressed up to look takeable. */
+function TradePlanPanel({
+  trade,
+}: {
+  trade: import('../lib/api').GoldTradePlan | null | undefined
+}) {
+  if (!trade) return null
+
+  const fmt = (v: number | null | undefined) =>
+    v == null ? '--' : `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+  const pct = (v: number | null | undefined) =>
+    v == null ? '' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
+
+  if (trade.action === 'HOLD') {
+    return (
+      <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-950/50 p-2.5">
+        <div className="text-[10px] uppercase tracking-wider text-neutral-500 mb-2">
+          Trade plan
+        </div>
+        <div className="text-[11px] text-neutral-500">No position.</div>
+        <div className="mt-1.5 space-y-1">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-neutral-600">Would go long above</span>
+            <span className="font-mono text-emerald-400/80 tabular-nums">
+              {fmt(trade.trigger_long_above)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-neutral-600">Would go short below</span>
+            <span className="font-mono text-red-400/80 tabular-nums">
+              {fmt(trade.trigger_short_below)}
+            </span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const rr = trade.risk_reward
+  const rrColor = trade.viable ? 'text-emerald-400' : 'text-amber-400'
+
+  return (
+    <div
+      className={`mt-1 rounded-md border p-2.5 ${
+        trade.viable
+          ? 'border-emerald-900/60 bg-emerald-950/10'
+          : 'border-amber-900/50 bg-amber-950/10'
+      }`}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] uppercase tracking-wider text-neutral-500">Trade plan</span>
+        <span
+          className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded ${
+            trade.viable
+              ? 'bg-emerald-500/15 text-emerald-400'
+              : 'bg-amber-500/15 text-amber-400'
+          }`}
+        >
+          {trade.viable ? 'Takeable' : 'Skip'}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-center">
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-neutral-600">Entry</div>
+          <div className="font-mono text-[13px] text-neutral-100 tabular-nums">
+            {fmt(trade.entry)}
+          </div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-neutral-600">Stop</div>
+          <div className="font-mono text-[13px] text-red-400 tabular-nums">
+            {fmt(trade.stop_loss)}
+          </div>
+          <div className="text-[9px] text-neutral-600 tabular-nums">
+            {pct(trade.stop_distance_pct == null ? null : -trade.stop_distance_pct)}
+          </div>
+        </div>
+        <div>
+          <div className="text-[9px] uppercase tracking-wider text-neutral-600">Target</div>
+          <div
+            className={`font-mono text-[13px] tabular-nums ${
+              trade.model_conflict ? 'text-neutral-600' : 'text-emerald-400'
+            }`}
+          >
+            {trade.model_conflict ? '--' : fmt(trade.take_profit)}
+          </div>
+          <div className="text-[9px] text-neutral-600 tabular-nums">
+            {trade.model_conflict ? '' : pct(trade.target_distance_pct)}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-2 pt-2 border-t border-neutral-800/70 space-y-1">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-neutral-500">Risk / reward</span>
+          <span className={`font-mono tabular-nums ${rrColor}`}>
+            {rr == null ? '--' : `${rr.toFixed(2)}x`}
+          </span>
+        </div>
+        {trade.stop_atr_multiple != null && (
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-neutral-600">Stop width</span>
+            <span className="font-mono text-neutral-500 tabular-nums">
+              {trade.stop_atr_multiple.toFixed(1)} ATR
+            </span>
+          </div>
+        )}
+        {trade.structural_target != null && (
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-neutral-600">
+              Structural level <span className="text-neutral-700">(not the target)</span>
+            </span>
+            <span className="font-mono text-neutral-500 tabular-nums">
+              {fmt(trade.structural_target)}
+              {trade.structural_risk_reward != null &&
+                ` \u00b7 ${trade.structural_risk_reward.toFixed(2)}x`}
+            </span>
+          </div>
+        )}
+        {trade.size_multiplier != null && trade.size_multiplier < 0.99 && (
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-neutral-600">Size (micro conviction)</span>
+            <span className="font-mono text-amber-400 tabular-nums">
+              &times;{trade.size_multiplier.toFixed(2)}
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div
+        className={`mt-2 text-[10px] leading-relaxed ${
+          trade.viable ? 'text-neutral-600' : 'text-amber-500/80'
+        }`}
+      >
+        {trade.note}
+      </div>
+    </div>
+  )
+}
+
 /** Concrete levels to watch: where the call is confirmed, and where it is
  * wrong. A target price alone says where the model thinks price is going but
  * nothing about when to stop believing it. Derived from real recent highs and
@@ -544,6 +693,8 @@ function PredictionCard({
               </div>
             </div>
           )}
+
+          <TradePlanPanel trade={prediction!.trade} />
 
           <MacroBlendPanel blend={prediction!.blend} />
 

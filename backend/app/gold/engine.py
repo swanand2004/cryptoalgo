@@ -167,6 +167,121 @@ def _price_levels(frame, horizon_bars: int, action: str) -> dict:
     }
 
 
+# Stop distance, in ATR. Matches the `invalidation` line already shown, so
+# the trade plan and the levels panel never disagree about where the call
+# stops being valid.
+TRADE_STOP_ATR = 2.0
+# Hard cap. Hugging a structural level is worth doing, chasing one 6 ATR away
+# is not -- past this the trade is simply too wide to be the same trade.
+TRADE_MAX_STOP_ATR = 3.0
+# Slack beyond a structural level, so an obvious wick does not take the stop.
+TRADE_STRUCTURE_BUFFER_ATR = 0.25
+# Below this the stop costs more than the model's own target pays.
+MIN_VIABLE_RR = 1.0
+
+
+def _trade_plan(levels: dict, action: str, price: float | None,
+                target_price: float | None, conviction: float = 1.0) -> dict:
+    """Entry / stop / target for the call, plus whether it is worth taking.
+
+    The take-profit is the MODEL'S OWN predicted price, not a structural
+    level that happens to give a flattering ratio. That distinction is the
+    whole point: resistance is where price might go, the model target is
+    where this model says it goes, and only the second one has a measured
+    track record attached. The structural level is returned alongside as
+    context, clearly named, never substituted in when the model's number is
+    unimpressive.
+
+    Consequences of that choice are reported rather than hidden:
+      - risk_reward below 1 means the 2-ATR stop costs more than the model's
+        own target pays. The plan is still returned, marked not viable.
+      - the gated score and the raw return regression can disagree (score
+        says BUY, predicted return is negative). That is a real conflict
+        inside the model and is surfaced, not resolved by quietly flipping
+        one of them.
+
+    HOLD returns no entry -- there is no position -- but keeps the two levels
+    whose breach would START a trade, which is the actionable part of a
+    no-trade call.
+    """
+    atr = levels.get("atr")
+    support, resistance = levels.get("support"), levels.get("resistance")
+    if price is None or not atr or atr <= 0:
+        return {"action": "HOLD", "viable": False, "entry": None, "stop_loss": None,
+                "take_profit": None, "risk_reward": None,
+                "note": "no ATR available -- cannot place a stop honestly"}
+
+    if action == "HOLD":
+        return {
+            "action": "HOLD", "viable": False, "entry": None, "stop_loss": None,
+            "take_profit": None, "risk_reward": None,
+            "trigger_long_above": _clean(resistance) if resistance else None,
+            "trigger_short_below": _clean(support) if support else None,
+            "note": "no position -- a close beyond either level is what would start one",
+        }
+
+    long_side = action == "BUY"
+    direction = 1.0 if long_side else -1.0
+    structure_stop_level = support if long_side else resistance
+
+    stop = price - direction * TRADE_STOP_ATR * atr
+    structure_used = False
+    # If the structural level sits just beyond the ATR stop, the stop is
+    # sitting exactly where a wick would run it. Step past the level instead.
+    if structure_stop_level is not None:
+        beyond = (structure_stop_level < stop) if long_side else (structure_stop_level > stop)
+        if beyond and abs(stop - structure_stop_level) <= 0.5 * atr:
+            stop = structure_stop_level - direction * TRADE_STRUCTURE_BUFFER_ATR * atr
+            structure_used = True
+    # Cap, applied after the structural adjustment so it binds either path.
+    cap = price - direction * TRADE_MAX_STOP_ATR * atr
+    stop = max(stop, cap) if long_side else min(stop, cap)
+
+    risk = abs(price - stop)
+    take_profit = target_price
+    reward = (take_profit - price) * direction if take_profit is not None else None
+
+    conflict = take_profit is not None and reward is not None and reward <= 0
+    rr = (reward / risk) if (reward is not None and reward > 0 and risk > 0) else None
+    structural_target = resistance if long_side else support
+    structural_reward = ((structural_target - price) * direction) if structural_target else None
+
+    if conflict:
+        note = ("the model's predicted price sits AGAINST its own signal -- the classifier "
+                "and the return regression disagree, so there is no honest target here")
+    elif rr is None:
+        note = "no model target available"
+    elif rr < MIN_VIABLE_RR:
+        note = (f"target pays {rr:.2f}x what the stop risks -- the model's own predicted move "
+                f"does not cover a {TRADE_STOP_ATR:.0f}-ATR stop")
+    else:
+        note = f"target pays {rr:.2f}x the risk"
+    if structure_used:
+        note += "; stop placed beyond structure rather than on the flat ATR line"
+
+    return {
+        "action": action,
+        "viable": bool(rr is not None and rr >= MIN_VIABLE_RR),
+        "entry": _clean(price),
+        "stop_loss": _clean(stop),
+        "take_profit": _clean(take_profit) if take_profit is not None else None,
+        "risk_per_unit": _clean(risk),
+        "reward_per_unit": _clean(reward) if reward is not None else None,
+        "risk_reward": _clean(rr) if rr is not None else None,
+        "stop_distance_pct": _clean(risk / price * 100),
+        "target_distance_pct": _clean(abs(take_profit - price) / price * 100) if take_profit else None,
+        "stop_atr_multiple": _clean(risk / atr),
+        # Structure shown as CONTEXT. Not the take-profit, on purpose.
+        "structural_target": _clean(structural_target) if structural_target else None,
+        "structural_risk_reward": _clean(structural_reward / risk)
+            if (structural_reward is not None and structural_reward > 0 and risk > 0) else None,
+        # Conviction sizes the trade; it never moves entry, stop or target.
+        "size_multiplier": _clean(max(0.0, min(1.0, conviction))),
+        "model_conflict": bool(conflict),
+        "note": note,
+    }
+
+
 def _action_for(score: float | None, decidable: bool) -> str:
     if score is None or not decidable:
         return "HOLD"
@@ -254,7 +369,7 @@ def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.date
         if frame is None or frame.empty or not predictor.is_ready:
             predictions[horizon] = {
                 "score": None, "decidable": False, "resolution": cfg["resolution"], "horizon_bars": cfg["horizon_bars"],
-                "action": "HOLD", "levels": {}, "blend": None, "target_price": None, "expected_move_pct": None, "valid_until": valid_until,
+                "action": "HOLD", "levels": {}, "trade": None, "blend": None, "target_price": None, "expected_move_pct": None, "valid_until": valid_until,
                 "risk_level": risk_level, "risk_reason": risk_reason,
                 **report_summary,
             }
@@ -285,11 +400,14 @@ def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.date
         )
 
         action = _action_for(gated_last, decidable)
+        levels = _price_levels(frame, cfg["horizon_bars"], action)
         predictions[horizon] = {
             "score": gated_last, "decidable": decidable, "resolution": cfg["resolution"], "horizon_bars": cfg["horizon_bars"],
             "action": action,
             "blend": blend,
-            "levels": _price_levels(frame, cfg["horizon_bars"], action),
+            "levels": levels,
+            "trade": _trade_plan(levels, action, frame_price, target_price,
+                                 blend.get("micro_conviction", 1.0)),
             "target_price": _clean(target_price) if target_price is not None else None,
             "expected_move_pct": _clean(raw_return * 100) if raw_return is not None else None,
             "valid_until": valid_until,
