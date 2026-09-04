@@ -299,6 +299,48 @@ export interface GoldSnapshot {
   cross_asset?: GoldCrossAsset
 }
 
+export interface CryptoFactor {
+  name: string
+  bucket: 'micro' | 'macro' | 'sentiment' | 'funding' | 'events' | 'astrology' | 'news'
+  value: number | null
+  z_score: number | null
+  score: number
+  direction: 'bullish' | 'bearish' | 'neutral'
+  /** Did this factor survive measurement? Only these carry weight. */
+  contributes: boolean
+  detail: string
+}
+
+export interface CryptoPrediction {
+  symbol: string
+  ready: boolean
+  reason?: string
+  as_of: string
+  price: number | null
+  horizon_hours: number
+  action: 'BUY' | 'SELL' | 'HOLD'
+  model_score: number
+  factor_score: number
+  blended_score: number
+  model_weight: number
+  factor_weight: number
+  deadband: number
+  sides_agree: boolean
+  model_ready?: boolean
+  factors_total: number
+  factors_contributing: number
+  buckets: string[]
+  factors: CryptoFactor[]
+}
+
+export interface CryptoPredictionsResponse {
+  as_of: string
+  model_weight: number
+  default_model_weight: number
+  resolution: string
+  predictions: CryptoPrediction[]
+}
+
 export interface NewsHeadline {
   title: string
   source: string
@@ -354,6 +396,8 @@ export const api = {
   goldSnapshot: () => req<GoldSnapshot>('/gold/snapshot'),
   goldCandles: (resolution = '1h', limit = 300) =>
     req<Candle[]>(`/gold/candles?resolution=${resolution}&limit=${limit}`),
+
+  cryptoPredictions: () => req<CryptoPredictionsResponse>('/predictions/crypto'),
 
   newsHeadlines: (limit = 40) => req<NewsHeadlinesResponse>(`/news/headlines?limit=${limit}`),
   newsSentimentHistory: (symbol = 'GLOBAL', hours = 72) =>

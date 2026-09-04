@@ -282,6 +282,17 @@ class Settings(BaseSettings):
     regime_low_vol_percentile: float = 0.25
     regime_high_vol_percentile: float = 0.75
 
+    # Crypto blended prediction: how much of the call comes from the ML model,
+    # the rest from measured factors (app/strategy/crypto_blend.py).
+    #
+    # 0.40 as requested. Worth knowing what it costs: out-of-fold the model
+    # scores BELOW a coin flip on all three symbols (BTC 49.01%, ETH 47.98%,
+    # SOL 48.81%), so this weight subtracts roughly 0.15 points from the
+    # factor half's accuracy -- inside the noise band, but the sign is not in
+    # doubt. Configurable so the trade-off stays a decision rather than a
+    # constant buried in a module.
+    crypto_blend_model_weight: float = 0.40
+
     @property
     def symbol_list(self) -> list[str]:
         return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]

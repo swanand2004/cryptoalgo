@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, type NewsHeadline, type NewsSentimentPoint } from '../lib/api'
+import CryptoPredictionConsole from '../components/CryptoPredictionConsole'
 import { NewsGlobe } from '../components/NewsGlobe'
 
 const TABS = [
@@ -200,6 +201,8 @@ export default function News() {
           honestly.
         </div>
       </div>
+
+      <CryptoPredictionConsole />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 rounded-lg border border-cyan-900/40 bg-[radial-gradient(circle_at_30%_20%,rgba(8,145,178,0.08),transparent_60%)] p-2 h-[420px]">
