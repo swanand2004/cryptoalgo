@@ -169,9 +169,22 @@ export interface GoldMacroFactor {
   contributes: boolean
 }
 
+export interface GoldMicroFactor {
+  name: string
+  kind: 'directional' | 'regime'
+  value: number | null
+  score: number
+  conviction: number
+  direction: string
+  detail: string
+}
+
 export interface GoldBlend {
   model_score: number
   factor_score: number
+  directional_score: number
+  micro_conviction: number
+  micro_factors: GoldMicroFactor[]
   blended_score: number
   model_weight: number
   factor_weight: number

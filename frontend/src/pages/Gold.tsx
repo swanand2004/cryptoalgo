@@ -330,6 +330,13 @@ function LevelsPanel({
   )
 }
 
+const MICRO_LABEL: Record<string, string> = {
+  vol_term_structure: 'Realized-vol term structure',
+  session: 'Trading session',
+  london_fix: 'LBMA auction proximity',
+  macro_event: 'US release proximity',
+}
+
 const FACTOR_LABEL: Record<string, string> = {
   real_rate_change: 'Real rates (10y TIPS)',
   dollar_change: 'US dollar (broad TWI)',
@@ -430,10 +437,42 @@ function MacroBlendPanel({ blend }: { blend: import('../lib/api').GoldBlend | nu
         ))}
       </div>
 
+      {blend.micro_factors?.length > 0 && (
+        <div className="mt-2.5 pt-2 border-t border-neutral-800/70">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] uppercase tracking-wider text-neutral-500">
+              Micro (conviction only)
+            </span>
+            <span
+              className={`font-mono text-[10px] tabular-nums ${
+                blend.micro_conviction < 0.99 ? 'text-amber-400' : 'text-neutral-500'
+              }`}
+            >
+              &times;{blend.micro_conviction.toFixed(2)}
+            </span>
+          </div>
+          {blend.micro_factors.map((m) => (
+            <div key={m.name} className="flex items-center justify-between text-[10px]" title={m.detail}>
+              <span className="text-neutral-600">{MICRO_LABEL[m.name] ?? m.name}</span>
+              <span
+                className={`font-mono tabular-nums ${
+                  m.conviction < 0.99 ? 'text-amber-400' : 'text-neutral-600'
+                }`}
+              >
+                {m.direction}
+                {m.conviction < 0.99 && ` ×${m.conviction.toFixed(2)}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="mt-2 text-[10px] text-neutral-600 leading-relaxed">
         Measured accuracy: real rates 54.4% (21d), dollar 52.9% (10d) against a 50% coin
         flip with a &plusmn;2.1pt noise band. The other two scored at or below 50% and are
-        shown but not weighted.
+        shown but not weighted. Micro factors scale conviction and never vote on direction:
+        on 52,586 hourly bars none beat gold&rsquo;s 45.3% baseline up-rate, so without an
+        order book there is micro risk here but no micro alpha.
       </div>
     </div>
   )

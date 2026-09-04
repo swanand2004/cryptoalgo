@@ -147,3 +147,70 @@ def test_a_missing_model_score_is_treated_as_no_opinion():
     blend = blend_score(None, compute_macro_factors(_frames()))
     assert blend["model_score"] == 0.0
     assert np.isfinite(blend["blended_score"])
+
+
+# --- micro factors: conviction scaling, never a directional vote ----------
+
+def test_micro_factors_never_vote_on_direction():
+    """Measured 2026-09-04 on 52,586 hourly bars: vol term structure came in
+    at 44.5-48.6%, below 50% at every horizon with its committed sign, and no
+    session or fix window differed from gold's 45.3% unconditional up-rate.
+    Without an order book there is micro RISK here but no micro ALPHA."""
+    import numpy as np
+
+    from app.gold.micro_factors import MICRO_DIRECTIONAL_FACTORS, compute_micro_factors, directional_score
+
+    n = 600
+    frame = pd.DataFrame({
+        "time": [1_600_000_000 + i * 3600 for i in range(n)],
+        "close": 2000 + np.cumsum(np.random.default_rng(1).normal(0, 3.0, n)),
+    })
+    factors = compute_micro_factors(frame)
+    assert MICRO_DIRECTIONAL_FACTORS == ()
+    assert directional_score(factors) == 0.0
+
+
+def test_vol_term_structure_is_still_computed_and_shown():
+    """Zero weight, not deleted -- the reading is useful context and hiding a
+    factor that failed would make the blend look better informed than it is."""
+    import numpy as np
+
+    from app.gold.micro_factors import compute_micro_factors
+
+    n = 600
+    frame = pd.DataFrame({
+        "time": [1_600_000_000 + i * 3600 for i in range(n)],
+        "close": 2000 + np.cumsum(np.random.default_rng(2).normal(0, 3.0, n)),
+    })
+    vol = next(f for f in compute_micro_factors(frame) if f.name == "vol_term_structure")
+    assert vol.kind == "directional"
+    assert vol.value is not None  # computed
+
+
+def test_conviction_multipliers_compound_rather_than_average():
+    """Two independent reasons for caution (thin session AND an imminent
+    release) should stack. Averaging them would let one excuse cancel the
+    other, which is backwards for risk."""
+    from app.gold.micro_factors import MicroFactor, conviction_multiplier
+
+    one = [MicroFactor("a", "regime", None, 0.0, 0.6, "x", "")]
+    two = [MicroFactor("a", "regime", None, 0.0, 0.6, "x", ""),
+           MicroFactor("b", "regime", None, 0.0, 0.35, "y", "")]
+    assert conviction_multiplier(one) == pytest.approx(0.6)
+    assert conviction_multiplier(two) == pytest.approx(0.21)  # 0.6 * 0.35, not 0.475
+
+
+def test_low_conviction_shrinks_the_call_without_flipping_it():
+    """Conviction scaling must never change WHICH way the call points -- it
+    only reduces how much is riding on it."""
+    factors = compute_macro_factors(_frames(real=_flat_then_rising(step=-0.02)))
+    full = blend_score(0.8, factors, micro_conviction=1.0)
+    damped = blend_score(0.8, factors, micro_conviction=0.3)
+    assert full["blended_score"] > damped["blended_score"] > 0  # smaller, same sign
+    assert damped["directional_score"] == pytest.approx(full["directional_score"])
+
+
+def test_conviction_is_clamped_to_zero_one():
+    factors = compute_macro_factors(_frames())
+    assert blend_score(0.9, factors, micro_conviction=5.0)["micro_conviction"] == 1.0
+    assert blend_score(0.9, factors, micro_conviction=-2.0)["micro_conviction"] == 0.0

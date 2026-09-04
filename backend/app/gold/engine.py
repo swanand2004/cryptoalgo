@@ -12,6 +12,7 @@ from app.data.query import load_candles_df
 from app.gold.cross_asset import crypto_correlation_context
 from app.gold.events import build_gold_events
 from app.gold.macro_factors import CFTC_SYMBOL, FRED_SERIES, blend_score, compute_macro_factors
+from app.gold.micro_factors import compute_micro_factors, conviction_multiplier
 from app.gold.features import GOLD_FEATURE_COLUMNS, build_gold_feature_frame, gold_regime
 from app.gold.ingest import GOLD_SPOT_SYMBOL
 from app.gold.predict import GoldPredictor
@@ -276,7 +277,12 @@ def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.date
         # still follows the model's own score: the factor half informs and is
         # shown alongside, but silently letting macro flip a call would change
         # what the model's measured accuracy actually refers to.
-        blend = blend_score(gated_last, macro_factors, model_weight=GOLD_MODEL_WEIGHT)
+        micro = compute_micro_factors(frame, now)
+        blend = blend_score(
+            gated_last, macro_factors, model_weight=GOLD_MODEL_WEIGHT,
+            micro_conviction=conviction_multiplier(micro),
+            micro_detail=[f.__dict__ for f in micro],
+        )
 
         action = _action_for(gated_last, decidable)
         predictions[horizon] = {

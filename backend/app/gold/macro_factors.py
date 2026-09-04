@@ -286,7 +286,9 @@ def compute_macro_factors(frames: dict[str, pd.DataFrame]) -> list[FactorScore]:
 
 
 def blend_score(model_score: float | None, factors: list[FactorScore],
-                model_weight: float = 0.5) -> dict:
+                model_weight: float = 0.5,
+                micro_conviction: float = 1.0,
+                micro_detail: list | None = None) -> dict:
     """Combines the model's own score with the macro factor composite.
 
     Default 50/50 as requested. The factor side is an equal-weighted mean of
@@ -305,7 +307,13 @@ def blend_score(model_score: float | None, factors: list[FactorScore],
     model = float(model_score) if model_score is not None else 0.0
 
     fw = 1.0 - model_weight
-    blended = model_weight * model + fw * factor_score
+    directional = model_weight * model + fw * factor_score
+    # Micro factors scale CONVICTION, they never vote on direction -- measured
+    # 2026-09-04, no micro factor beat its baseline (see micro_factors.py).
+    # Applied multiplicatively so an imminent FOMC and a thin session compound
+    # instead of averaging to something middling.
+    conviction = max(0.0, min(1.0, micro_conviction))
+    blended = directional * conviction
     agree = (model > 0) == (factor_score > 0) and abs(model) > 0.05 and abs(factor_score) > 0.05
 
     return {
@@ -314,6 +322,9 @@ def blend_score(model_score: float | None, factors: list[FactorScore],
         "blended_score": round(float(np.clip(blended, -1, 1)), 4),
         "model_weight": model_weight,
         "factor_weight": round(fw, 4),
+        "directional_score": round(float(np.clip(directional, -1, 1)), 4),
+        "micro_conviction": round(conviction, 4),
+        "micro_factors": micro_detail or [],
         "factors_available": len(available),
         "factors_contributing": len(contributing),
         "factors_total": len(factors),
