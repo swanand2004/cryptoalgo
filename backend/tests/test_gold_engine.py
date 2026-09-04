@@ -105,11 +105,16 @@ async def test_snapshot_loads_the_small_serving_limit_not_the_full_training_limi
     import app.gold.engine as engine_mod
     from app.gold.train import GOLD_HORIZONS
 
-    seen_limits: dict[str, int] = {}
+    # Keyed by (symbol, resolution), not resolution alone: the snapshot also
+    # loads MACRO:* series at 1d with a deliberately large limit (they are
+    # tiny daily series, not the O(rows x window) feature bank this test
+    # guards). Keying on resolution only let those overwrite the gold entry
+    # and made the assertion read the wrong call.
+    seen_limits: dict[tuple[str, str], int] = {}
     real_load = engine_mod.load_candles_df
 
     async def _spy_load(symbol, resolution, limit=500):
-        seen_limits[resolution] = limit
+        seen_limits[(symbol, resolution)] = limit
         return await real_load(symbol, resolution, limit=limit)
 
     monkeypatch.setattr(engine_mod, "load_candles_df", _spy_load)
@@ -120,9 +125,12 @@ async def test_snapshot_loads_the_small_serving_limit_not_the_full_training_limi
 
     await build_gold_snapshot()
 
+    from app.gold.ingest import GOLD_SPOT_SYMBOL
+
     for cfg in GOLD_HORIZONS.values():
-        assert seen_limits[cfg["resolution"]] == cfg["serving_limit"]
-        assert seen_limits[cfg["resolution"]] < cfg["limit"]
+        key = (GOLD_SPOT_SYMBOL, cfg["resolution"])
+        assert seen_limits[key] == cfg["serving_limit"]
+        assert seen_limits[key] < cfg["limit"]
 
 
 @pytest.mark.asyncio

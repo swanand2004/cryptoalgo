@@ -11,6 +11,7 @@ import pandas as pd
 from app.data.query import load_candles_df
 from app.gold.cross_asset import crypto_correlation_context
 from app.gold.events import build_gold_events
+from app.gold.macro_factors import CFTC_SYMBOL, FRED_SERIES, blend_score, compute_macro_factors
 from app.gold.features import GOLD_FEATURE_COLUMNS, build_gold_feature_frame, gold_regime
 from app.gold.ingest import GOLD_SPOT_SYMBOL
 from app.gold.predict import GoldPredictor
@@ -78,6 +79,93 @@ def _load_report_summary(horizon: str) -> dict:
     }
 
 
+
+# Requested split: half the call from this project's own model, half from the
+# macro factors. See macro_factors.COMPOSITE_FACTORS for what the factor half
+# is actually made of and the measured accuracy behind that choice.
+GOLD_MODEL_WEIGHT = 0.5
+
+
+async def _load_macro_factors() -> list:
+    """Macro series -> scored factors. Never fatal: gold prediction must keep
+    working when FRED or CFTC is unreachable, so a failure yields neutral
+    (zero-contribution) factors rather than taking the snapshot down."""
+    try:
+        frames = {}
+        for _series_id, (symbol, _name) in FRED_SERIES.items():
+            frames[symbol] = await load_candles_df(symbol, "1d", limit=20_000)
+        frames[CFTC_SYMBOL] = await load_candles_df(CFTC_SYMBOL, "1d", limit=20_000)
+        return compute_macro_factors(frames)
+    except Exception:
+        logger.exception("Macro factor load failed -- gold prediction continues without them")
+        return compute_macro_factors({})
+
+
+def _price_levels(frame, horizon_bars: int, action: str) -> dict:
+    """Concrete prices at which the call is CONFIRMED or INVALIDATED.
+
+    A target price on its own is not actionable: it says where the model
+    thinks price is going but nothing about when to stop believing it. These
+    are the levels to watch, derived from actual recent price structure
+    rather than round numbers:
+
+      resistance / support -- the highest high and lowest low over a window
+          scaled to the prediction's own horizon. A close beyond one of these
+          is a genuine break of the range the forecast was made inside.
+      breakout_above / breakdown_below -- the level whose breach CONFIRMS the
+          call, and the one that breaks it. Which is which flips with
+          direction: for a BUY, clearing resistance confirms and losing
+          support invalidates; for a SELL it is the mirror image.
+      invalidation -- an ATR-based line placed against the position, so it
+          adapts to how volatile gold currently is instead of using a fixed
+          percentage that means different things in calm and wild markets.
+
+    Returns empty when the frame lacks the columns or history to say anything
+    honest, rather than inventing levels from a handful of bars.
+    """
+    needed = {"high", "low", "close"}
+    if frame is None or frame.empty or not needed.issubset(frame.columns):
+        return {}
+
+    # Window scaled to the horizon: a 1-hour-ahead call should not be judged
+    # against a 3-month range, and a 1-week call should not be judged against
+    # the last few bars.
+    window = max(20, min(int(horizon_bars) * 10, len(frame)))
+    recent = frame.tail(window)
+    if len(recent) < 20:
+        return {}
+
+    resistance = float(recent["high"].max())
+    support = float(recent["low"].min())
+    price = float(frame["close"].iloc[-1])
+
+    atr_pct = frame["atr_pct_14"].iloc[-1] if "atr_pct_14" in frame.columns else None
+    atr_abs = float(atr_pct) * price if atr_pct is not None and pd.notna(atr_pct) else None
+
+    if action == "BUY":
+        breakout_above, breakdown_below = resistance, support
+        invalidation = price - 2.0 * atr_abs if atr_abs else support
+    elif action == "SELL":
+        breakout_above, breakdown_below = support, resistance
+        invalidation = price + 2.0 * atr_abs if atr_abs else resistance
+    else:
+        # HOLD: no position to invalidate, but the range worth watching for a
+        # break in either direction is still meaningful.
+        breakout_above, breakdown_below, invalidation = resistance, support, None
+
+    return {
+        "support": _clean(support),
+        "resistance": _clean(resistance),
+        "breakout_above": _clean(breakout_above),
+        "breakdown_below": _clean(breakdown_below),
+        "invalidation": _clean(invalidation) if invalidation is not None else None,
+        "atr": _clean(atr_abs) if atr_abs is not None else None,
+        "range_window_bars": int(window),
+        "distance_to_breakout_pct": _clean((breakout_above / price - 1) * 100),
+        "distance_to_breakdown_pct": _clean((breakdown_below / price - 1) * 100),
+    }
+
+
 def _action_for(score: float | None, decidable: bool) -> str:
     if score is None or not decidable:
         return "HOLD"
@@ -111,7 +199,8 @@ def _risk_level(mean_directional_accuracy: float | None, n_samples: int | None) 
     return "low", f"{mean_directional_accuracy:.0%} historical accuracy across {n_samples} samples"
 
 
-def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.datetime) -> dict:
+def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.datetime,
+                              macro_factors: list | None = None) -> dict:
     """The actual CPU-heavy work (feature computation, prediction) -- kept
     fully synchronous and called via asyncio.to_thread by build_gold_snapshot
     below, never awaited directly on the main event loop. Real bug caught
@@ -142,6 +231,8 @@ def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.date
             "events": build_gold_events(now),
         }
 
+    macro_factors = macro_factors or []
+
     last = display_frame.iloc[-1]
     current_price = float(last["close"])
     indicators = {col: _clean(last[col]) for col in GOLD_FEATURE_COLUMNS if col in display_frame.columns}
@@ -162,7 +253,7 @@ def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.date
         if frame is None or frame.empty or not predictor.is_ready:
             predictions[horizon] = {
                 "score": None, "decidable": False, "resolution": cfg["resolution"], "horizon_bars": cfg["horizon_bars"],
-                "action": "HOLD", "target_price": None, "expected_move_pct": None, "valid_until": valid_until,
+                "action": "HOLD", "levels": {}, "blend": None, "target_price": None, "expected_move_pct": None, "valid_until": valid_until,
                 "risk_level": risk_level, "risk_reason": risk_reason,
                 **report_summary,
             }
@@ -181,9 +272,18 @@ def _build_gold_snapshot_sync(raw_candles: dict[str, pd.DataFrame], now: dt.date
         frame_price = float(frame["close"].iloc[-1])
         target_price = frame_price * (1 + raw_return) if raw_return is not None else None
 
+        # 50/50 model / macro-factor blend, per explicit request. The ACTION
+        # still follows the model's own score: the factor half informs and is
+        # shown alongside, but silently letting macro flip a call would change
+        # what the model's measured accuracy actually refers to.
+        blend = blend_score(gated_last, macro_factors, model_weight=GOLD_MODEL_WEIGHT)
+
+        action = _action_for(gated_last, decidable)
         predictions[horizon] = {
             "score": gated_last, "decidable": decidable, "resolution": cfg["resolution"], "horizon_bars": cfg["horizon_bars"],
-            "action": _action_for(gated_last, decidable),
+            "action": action,
+            "blend": blend,
+            "levels": _price_levels(frame, cfg["horizon_bars"], action),
             "target_price": _clean(target_price) if target_price is not None else None,
             "expected_move_pct": _clean(raw_return * 100) if raw_return is not None else None,
             "valid_until": valid_until,
@@ -228,6 +328,7 @@ async def build_gold_snapshot() -> dict:
             raw_candles[resolution] = candles
 
     cross_asset = await crypto_correlation_context()
-    snapshot = await asyncio.to_thread(_build_gold_snapshot_sync, raw_candles, now)
+    macro_factors = await _load_macro_factors()
+    snapshot = await asyncio.to_thread(_build_gold_snapshot_sync, raw_candles, now, macro_factors)
     snapshot["cross_asset"] = cross_asset
     return snapshot

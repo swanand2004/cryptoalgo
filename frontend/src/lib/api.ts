@@ -146,7 +146,45 @@ export interface MlPrediction {
   resolution: string
 }
 
+export interface GoldLevels {
+  support: number | null
+  resistance: number | null
+  breakout_above: number | null
+  breakdown_below: number | null
+  invalidation: number | null
+  atr: number | null
+  range_window_bars: number | null
+  distance_to_breakout_pct: number | null
+  distance_to_breakdown_pct: number | null
+}
+
+export interface GoldMacroFactor {
+  name: string
+  raw_value: number | null
+  z_score: number | null
+  score: number
+  direction: 'bullish' | 'bearish' | 'neutral'
+  as_of: string | null
+  detail: string
+  contributes: boolean
+}
+
+export interface GoldBlend {
+  model_score: number
+  factor_score: number
+  blended_score: number
+  model_weight: number
+  factor_weight: number
+  factors_available: number
+  factors_contributing: number
+  factors_total: number
+  sides_agree: boolean
+  factors: GoldMacroFactor[]
+}
+
 export interface GoldPrediction {
+  levels?: GoldLevels
+  blend?: GoldBlend | null
   score: number | null
   decidable: boolean
   resolution: string

@@ -258,16 +258,199 @@ function cryptoConfirmation(
   return total > 0 ? { agree, disagree, total } : null
 }
 
+/** Concrete levels to watch: where the call is confirmed, and where it is
+ * wrong. A target price alone says where the model thinks price is going but
+ * nothing about when to stop believing it. Derived from real recent highs and
+ * lows plus an ATR-scaled invalidation, so the numbers adapt to how volatile
+ * gold currently is rather than being fixed percentages. */
+function LevelsPanel({
+  levels,
+  action,
+  price,
+}: {
+  levels: import('../lib/api').GoldLevels | undefined
+  action: 'BUY' | 'SELL' | 'HOLD'
+  price: number | null
+}) {
+  if (!levels || levels.breakout_above == null || levels.breakdown_below == null) return null
+
+  const fmt = (v: number | null) =>
+    v == null ? '--' : `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+  const pct = (v: number | null) => (v == null ? '' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
+
+  // For a SELL the confirming break is DOWNWARD, so the labels follow the
+  // direction of the call rather than always saying "up = good".
+  const confirmLabel = action === 'SELL' ? 'Confirms below' : 'Confirms above'
+  const breakLabel = action === 'SELL' ? 'Breaks above' : 'Breaks below'
+  const isHold = action === 'HOLD'
+
+  return (
+    <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-950/50 p-2.5">
+      <div className="text-[10px] uppercase tracking-wider text-neutral-500 mb-2">
+        {isHold ? 'Range to watch' : 'Levels'}
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-emerald-400">{isHold ? 'Breaks up above' : confirmLabel}</span>
+          <span className="font-mono text-neutral-200 tabular-nums">
+            {fmt(levels.breakout_above)}{' '}
+            <span className="text-neutral-600">{pct(levels.distance_to_breakout_pct)}</span>
+          </span>
+        </div>
+
+        {price != null && (
+          <div className="flex items-center justify-between text-[11px] border-y border-neutral-800/70 py-1">
+            <span className="text-neutral-400">Now</span>
+            <span className="font-mono text-neutral-100 tabular-nums">{fmt(price)}</span>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-red-400">{isHold ? 'Breaks down below' : breakLabel}</span>
+          <span className="font-mono text-neutral-200 tabular-nums">
+            {fmt(levels.breakdown_below)}{' '}
+            <span className="text-neutral-600">{pct(levels.distance_to_breakdown_pct)}</span>
+          </span>
+        </div>
+      </div>
+
+      {levels.invalidation != null && (
+        <div className="mt-2 pt-2 border-t border-neutral-800/70 flex items-center justify-between text-[11px]">
+          <span className="text-amber-400">Invalidation (2 ATR)</span>
+          <span className="font-mono text-neutral-300 tabular-nums">{fmt(levels.invalidation)}</span>
+        </div>
+      )}
+
+      <div className="mt-1.5 text-[10px] text-neutral-600">
+        range over last {levels.range_window_bars} bars
+        {levels.atr != null && ` · ATR ${fmt(levels.atr)}`}
+      </div>
+    </div>
+  )
+}
+
+const FACTOR_LABEL: Record<string, string> = {
+  real_rate_change: 'Real rates (10y TIPS)',
+  dollar_change: 'US dollar (broad TWI)',
+  breakeven_inflation: 'Breakeven inflation',
+  cftc_positioning: 'CFTC spec positioning',
+}
+
+/** The requested 50/50 split: half this project's own model, half macro.
+ *
+ * Both halves are shown separately rather than only the blend, because when
+ * they disagree that is the most useful thing on the card -- averaging it
+ * into one number hides exactly the information a human wants.
+ *
+ * Two of the four factors carry zero weight. Measured 2026-09-04 on 2,196
+ * daily bars: only real rates (54.4% at 21d) and the dollar (52.9% at 10d)
+ * beat the +-2.1pt noise band. Breakevens and CFTC came in at or below a
+ * coin flip, and equal-weighting all four scored 44.6% -- worse than the
+ * best single factor. They stay visible as context but do not vote.
+ */
+function MacroBlendPanel({ blend }: { blend: import('../lib/api').GoldBlend | null | undefined }) {
+  if (!blend) return null
+
+  const bar = (v: number) => {
+    const pct = Math.min(Math.abs(v), 1) * 50
+    const pos = v >= 0
+    return (
+      <div className="relative h-1.5 w-full rounded-full bg-neutral-800 overflow-hidden">
+        <div className="absolute left-1/2 top-0 bottom-0 w-px bg-neutral-700" />
+        <div
+          className={`absolute top-0 bottom-0 rounded-full ${pos ? 'bg-emerald-500' : 'bg-red-500'}`}
+          style={pos ? { left: '50%', width: `${pct}%` } : { right: '50%', width: `${pct}%` }}
+        />
+      </div>
+    )
+  }
+  const num = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(3)}`
+
+  return (
+    <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-950/50 p-2.5">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] uppercase tracking-wider text-neutral-500">
+          Model {Math.round(blend.model_weight * 100)}% / Macro {Math.round(blend.factor_weight * 100)}%
+        </span>
+        <span
+          className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+            blend.sides_agree
+              ? 'bg-emerald-950 text-emerald-400 border border-emerald-900'
+              : 'bg-amber-950 text-amber-400 border border-amber-900'
+          }`}
+        >
+          {blend.sides_agree ? 'both agree' : 'halves disagree'}
+        </span>
+      </div>
+
+      <div className="space-y-2">
+        {[
+          { label: 'Model', value: blend.model_score },
+          { label: 'Macro', value: blend.factor_score },
+        ].map((row) => (
+          <div key={row.label} className="flex items-center gap-2">
+            <span className="w-12 shrink-0 text-[11px] text-neutral-400">{row.label}</span>
+            <div className="flex-1">{bar(row.value)}</div>
+            <span className="w-14 shrink-0 text-right font-mono text-[11px] text-neutral-400 tabular-nums">
+              {num(row.value)}
+            </span>
+          </div>
+        ))}
+        <div className="flex items-center gap-2 pt-1.5 border-t border-neutral-800/70">
+          <span className="w-12 shrink-0 text-[11px] font-medium text-neutral-300">Blend</span>
+          <div className="flex-1">{bar(blend.blended_score)}</div>
+          <span className="w-14 shrink-0 text-right font-mono text-[11px] text-neutral-100 tabular-nums">
+            {num(blend.blended_score)}
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-2.5 pt-2 border-t border-neutral-800/70 space-y-1">
+        {blend.factors.map((f) => (
+          <div key={f.name} className="flex items-center justify-between text-[10px]" title={f.detail}>
+            <span className={f.contributes ? 'text-neutral-400' : 'text-neutral-600 italic'}>
+              {FACTOR_LABEL[f.name] ?? f.name}
+              {!f.contributes && ' (context only)'}
+            </span>
+            <span
+              className={`font-mono tabular-nums ${
+                !f.contributes
+                  ? 'text-neutral-600'
+                  : f.direction === 'bullish'
+                  ? 'text-emerald-400'
+                  : f.direction === 'bearish'
+                  ? 'text-red-400'
+                  : 'text-neutral-500'
+              }`}
+            >
+              {f.z_score == null ? 'n/a' : `z ${f.z_score >= 0 ? '+' : ''}${f.z_score.toFixed(2)}`}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-2 text-[10px] text-neutral-600 leading-relaxed">
+        Measured accuracy: real rates 54.4% (21d), dollar 52.9% (10d) against a 50% coin
+        flip with a &plusmn;2.1pt noise band. The other two scored at or below 50% and are
+        shown but not weighted.
+      </div>
+    </div>
+  )
+}
+
 function PredictionCard({
   horizon,
   prediction,
   now,
   crossAsset,
+  currentPrice,
 }: {
   horizon: string
   prediction: GoldPrediction | undefined
   now: number
   crossAsset: import('../lib/api').GoldCrossAsset | undefined
+  currentPrice: number | null
 }) {
   const hasScore = prediction && prediction.score !== null
   const tier = hasScore ? signalTier(prediction!.score as number) : null
@@ -322,6 +505,14 @@ function PredictionCard({
               </div>
             </div>
           )}
+
+          <MacroBlendPanel blend={prediction!.blend} />
+
+          <LevelsPanel
+            levels={prediction!.levels}
+            action={action}
+            price={currentPrice}
+          />
 
           <div className="text-[11px] text-neutral-600">
             valid until <span className="text-neutral-400">{countdownLabel(prediction!.valid_until, now)}</span>
@@ -519,6 +710,7 @@ export default function Gold() {
                 prediction={snapshot.predictions[horizon]}
                 now={now}
                 crossAsset={snapshot.cross_asset}
+                currentPrice={snapshot.price ?? null}
               />
             ))}
           </div>
