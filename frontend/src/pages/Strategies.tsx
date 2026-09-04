@@ -251,7 +251,7 @@ function StrategyCard({ s }: { s: StrategyStats }) {
   )
 }
 
-function PerformanceSection() {
+function PerformanceSection({ running }: { running: string[] }) {
   // Default to the account's ACTUAL current mode rather than a hardcoded
   // "paper", so this never silently shows wrong-mode performance. A manual
   // pick still sticks.
@@ -265,7 +265,23 @@ function PerformanceSection() {
     refetchInterval: 15000,
   })
 
-  const stats = groupPerformance(tradesQuery.data ?? [])
+  const all = groupPerformance(tradesQuery.data ?? [])
+
+  // Only the strategies actually in the live lineup get a card. Six retired
+  // ones (mean_reversion, ml_signal, orderbook_imbalance, rahu, funding_carry,
+  // ensemble) still appear in closed-trade history and used to be rendered as
+  // full cards, which made the page look like it was running nine strategies.
+  //
+  // Their PnL is NOT discarded, though: it is real money this paper account
+  // made and lost, so dropping it silently would leave the total on this page
+  // disagreeing with the account. It is summarised in one line instead.
+  const runningSet = new Set(running)
+  const stats = all.filter((s) => runningSet.has(s.strategy))
+  const retired = all.filter((s) => !runningSet.has(s.strategy))
+  const retiredTotal = retired.reduce(
+    (acc, s) => ({ trades: acc.trades + s.trades, pnl: acc.pnl + s.pnl }),
+    { trades: 0, pnl: 0 }
+  )
   const total = stats.reduce(
     (acc, s) => ({ trades: acc.trades + s.trades, pnl: acc.pnl + s.pnl }),
     { trades: 0, pnl: 0 }
@@ -277,7 +293,8 @@ function PerformanceSection() {
         <div>
           <h2 className="text-sm font-medium text-neutral-200">Realised performance</h2>
           <p className="mt-0.5 text-[11px] text-neutral-600">
-            This account&rsquo;s actual closed trades &mdash; real fills, net of fees. Not a backtest.
+            This account&rsquo;s actual closed trades for the {running.length} running strategies &mdash; real fills,
+            net of fees. Not a backtest.
           </p>
           {mode !== actualMode && (
             <p className="mt-1 text-[11px] text-amber-400">
@@ -314,6 +331,22 @@ function PerformanceSection() {
           {stats.map((s) => (
             <StrategyCard key={s.strategy} s={s} />
           ))}
+          {retired.length > 0 && (
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 rounded-lg border border-neutral-800/60 bg-neutral-950/30 px-3 py-2 text-[10px] text-neutral-600">
+              <span className="uppercase tracking-[0.12em] text-neutral-500">Retired</span>
+              <span>
+                {retired.length} strategies no longer in the lineup hold{' '}
+                <span className="font-mono tabular-nums text-neutral-500">{retiredTotal.trades}</span> historical
+                trades worth{' '}
+                <span className={`font-mono tabular-nums ${retiredTotal.pnl >= 0 ? 'text-emerald-500/80' : 'text-red-500/80'}`}>
+                  {money(retiredTotal.pnl)}
+                </span>
+                . Kept in the total so this page reconciles with the account, not shown as cards.
+              </span>
+              <span className="ml-auto font-mono text-neutral-700">{retired.map((r) => r.strategy).join(' · ')}</span>
+            </div>
+          )}
+
           <p className="text-[10px] leading-relaxed text-neutral-600">
             Break-even win rate is <span className="font-mono text-neutral-500">1 / (1 + payoff)</span>. A strategy
             winning 59% of the time with an average winner 0.63x its average loser needs 61% and is losing money &mdash;
@@ -324,7 +357,11 @@ function PerformanceSection() {
         </div>
       ) : (
         <div className="rounded-lg border border-neutral-800/80 bg-neutral-950/40 py-10 text-center text-sm text-neutral-600">
-          {tradesQuery.isFetching ? 'Loading…' : `No closed trades yet in ${mode} mode.`}
+          {tradesQuery.isFetching
+            ? 'Loading…'
+            : retired.length > 0
+            ? `No closed trades yet from the running strategies in ${mode} mode (${retiredTotal.trades} from retired ones).`
+            : `No closed trades yet in ${mode} mode.`}
         </div>
       )}
     </div>
@@ -450,7 +487,7 @@ export default function Strategies() {
         </div>
       </div>
 
-      <PerformanceSection />
+      <PerformanceSection running={rows.map((r) => r.name)} />
     </div>
   )
 }

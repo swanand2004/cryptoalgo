@@ -49,11 +49,17 @@ from app.strategy.trend_momentum import TrendMomentumStrategy
 #   - rahu: a simpler, single-factor time-gate made redundant by graha's much
 #     deeper mechanism (which already includes its own Rahu-Kaal gate).
 #
-# The underlying strategy classes/files are untouched on disk (this project
-# has no git, so deleting them would be unrecoverable) -- only the wiring
-# that makes them part of the live ensemble, seeding, and backtesting is
-# gone. Re-adding one later is a matter of re-adding its entry below, not
-# rewriting it from scratch.
+# Their files USED to be kept on disk on the grounds that "this project has no
+# git, so deleting them would be unrecoverable". That premise no longer holds
+# -- the project is version-controlled -- so as of 2026-09-04 the five cut
+# strategies (mean_reversion, ml_signal, orderbook_imbalance, rahu,
+# residual_momentum) are deleted rather than left as unwired modules that look
+# live to anyone reading the directory. Recovering one is a git checkout of
+# this commit's parent, not a rewrite.
+#
+# funding_carry is NOT in that list despite being cut from the ensemble: it is
+# still active research, priced live by funding_carry_options.py, and is kept
+# deliberately. ensemble.py is core machinery, not a strategy.
 DEFAULT_WEIGHTS: dict[str, float] = {
     "trend_momentum": 1.0,
     "graha": 0.4,
