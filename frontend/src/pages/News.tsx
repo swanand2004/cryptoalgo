@@ -202,14 +202,14 @@ export default function News() {
         </div>
       </div>
 
-      <CryptoPredictionConsole />
-
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 rounded-lg border border-cyan-900/40 bg-[radial-gradient(circle_at_30%_20%,rgba(8,145,178,0.08),transparent_60%)] p-2 h-[420px]">
           <NewsGlobe headlines={headlines} />
         </div>
         <GlobalPulsePanel headlines={headlines} />
       </div>
+
+      <CryptoPredictionConsole />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <SentimentGauge title="Global" symbol="GLOBAL" />
