@@ -191,12 +191,18 @@ class Settings(BaseSettings):
     atr_stop_multiple: float = 2.5  # stop-loss distance, in ATRs, from entry
     atr_take_profit_multiple: float = 3.0  # take-profit distance, in ATRs (1.5:1 reward:risk)
     # Once a position has moved this many ATRs in its favor, the trailing
-    # stop stops using the wide entry stop_distance (2 ATR) and switches to
+    # stop stops using the wide entry stop_distance (atr_stop_multiple ATRs)
+    # and switches to
     # BOTH a floor at breakeven AND a tighter trail distance. Without this,
     # a position that spikes to within a whisker of take-profit and then
     # reverses can round-trip all the way back to breakeven or even a small
-    # loss, because the stop only trails at a constant 2 ATRs behind the
-    # peak regardless of how close to target price got.
+    # loss, because the stop only trails at a constant atr_stop_multiple ATRs
+    # behind the peak regardless of how close to target price got.
+    #
+    # AS CONFIGURED THIS STAGE NEVER ENGAGES -- see the 3.0 below. The
+    # mechanism is kept working and tested (tests/test_trailing_policy.py)
+    # because disabling it is a measured decision that could be revisited,
+    # not because it is in use.
     # Was 1.0 -- lowered per explicit "make the trailing more aggressive"
     # request so the breakeven floor + tightened trail engage at HALF the
     # favorable move they used to (a smaller move now counts as "committed
