@@ -10,8 +10,9 @@ class _FlattenSpy:
     def __init__(self) -> None:
         self.calls: list[str | None] = []
 
-    async def flatten_all(self, mode_override: str | None = None) -> None:
+    async def flatten_all(self, mode_override: str | None = None, reason: str = "kill_switch") -> None:
         self.calls.append(mode_override)
+        self.reasons = getattr(self, "reasons", []) + [reason]
 
 
 class _FakeRuntime:
@@ -20,21 +21,22 @@ class _FakeRuntime:
 
 
 @pytest.mark.asyncio
-async def test_kill_switch_flattens_the_mode_that_was_actually_live_before_switching_to_paper():
-    """Regression test: update_kill_switch used to call set_trading_mode("paper")
-    BEFORE flatten_all(), and flatten_all() with no override reads the
-    *current* mode -- so a kill-switch hit while genuinely LIVE-trading would
-    flatten paper positions (a no-op) while real Delta positions stayed open
-    and unmanaged, defeating the one thing the kill switch exists to
-    guarantee. It must flatten whichever mode was active BEFORE the switch.
-    """
+async def test_kill_switch_flattens_live_and_halts_in_place_without_switching_to_paper():
+    """The kill switch flattens the account that is actually trading and then
+    HALTS -- the mode stays live (it used to be flipped to paper, so the site
+    stopped showing the real account and every halt needed a manual switch
+    back). The switch itself is what stops new trades."""
+    from app.data.app_state import is_kill_switch_on
+
     await set_trading_mode("live")
     runtime = _FakeRuntime()
 
     await update_kill_switch(KillSwitchUpdate(on=True), runtime=runtime)
 
     assert runtime.order_manager.calls == ["live"]
-    assert await get_trading_mode() == "paper"
+    assert runtime.order_manager.reasons == ["kill_switch"]
+    assert await get_trading_mode() == "live"
+    assert await is_kill_switch_on()
 
 
 @pytest.mark.asyncio

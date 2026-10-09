@@ -6,6 +6,10 @@ import os
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_cryptoalgo.db"
 os.environ.setdefault("DELTA_API_KEY", "test-key")
 os.environ.setdefault("DELTA_API_SECRET", "test-secret")
+# Owner alerts OFF in tests even if a local .env holds a real bot token: an env
+# var (even empty) wins over .env, so no test can ever message the owner.
+os.environ["TELEGRAM_BOT_TOKEN"] = ""
+os.environ["TELEGRAM_CHAT_ID"] = ""
 
 import pathlib
 

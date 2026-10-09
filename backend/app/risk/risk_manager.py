@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import json
 import logging
 from dataclasses import dataclass, field
 
@@ -13,10 +15,22 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ExternalFlow:
+    """A deposit (+) or withdrawal (-) on the exchange wallet -- money that
+    moved in or out, not money the strategy made or lost."""
+    uid: str
+    time: dt.datetime
+    amount: float
+
+
+@dataclass
 class DailyPnLTracker:
     day: dt.date = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc).date())
     realized_pnl: float = 0.0
     starting_equity: float = 0.0
+    # When starting_equity was taken. A deposit/withdrawal AFTER it is not in
+    # it and must be added; one before it is already included.
+    anchored_at: dt.datetime | None = None
 
     def roll_if_new_day(self, equity: float) -> None:
         today = dt.datetime.now(dt.timezone.utc).date()
@@ -24,6 +38,11 @@ class DailyPnLTracker:
             self.day = today
             self.realized_pnl = 0.0
             self.starting_equity = equity
+            self.anchored_at = dt.datetime.now(dt.timezone.utc)
+
+    def anchor(self, equity: float) -> None:
+        self.starting_equity = equity
+        self.anchored_at = dt.datetime.now(dt.timezone.utc)
 
     def add_realized(self, pnl: float) -> None:
         self.realized_pnl += pnl
@@ -39,6 +58,9 @@ class RiskManager:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.daily_pnl = DailyPnLTracker()
+        # Three supervisors apply flows concurrently; without this two of them
+        # read the same "applied" list and add one deposit twice (seen live).
+        self._flows_lock = asyncio.Lock()
 
     async def load_daily_pnl_state(self) -> None:
         """Hydrates the in-memory daily-PnL tracker from persisted state at
@@ -61,11 +83,88 @@ class RiskManager:
         self.daily_pnl.day = stored_day
         self.daily_pnl.realized_pnl = float(await get_state("daily_pnl_realized", "0.0") or 0.0)
         self.daily_pnl.starting_equity = float(await get_state("daily_pnl_starting_equity", "0.0") or 0.0)
+        raw_anchor = await get_state("daily_pnl_anchored_at")
+        self.daily_pnl.anchored_at = dt.datetime.fromisoformat(raw_anchor) if raw_anchor else None
+
+    async def rebase_for_mode_switch(self, equity: float) -> None:
+        """Re-anchors the drawdown peak and today's starting equity to the
+        account being SWITCHED TO. Paper and live share one set of risk state,
+        so without this the first check after paper ($5,732 peak) -> live
+        ($3.67 account) reads as a 99.9% drawdown and an equal daily loss,
+        trips both breakers, flattens and forces paper within seconds. The
+        limits themselves are unchanged -- they now measure the right account."""
+        await self.set_high_water_mark(equity)
+        self.daily_pnl.day = dt.datetime.now(dt.timezone.utc).date()
+        self.daily_pnl.realized_pnl = 0.0
+        self.daily_pnl.anchor(max(equity, 0.0))
+        await self._persist_daily_pnl_state()
+
+    async def set_high_water_mark(self, equity: float) -> None:
+        """Sets the drawdown peak and stamps WHEN, so a later deposit or
+        withdrawal can tell whether the peak already contains it."""
+        await set_state("equity_high_water_mark", str(max(equity, 0.0)))
+        await set_state("equity_high_water_mark_at", dt.datetime.now(dt.timezone.utc).isoformat())
+
+    async def apply_external_flows(self, flows: list[ExternalFlow]) -> list[ExternalFlow]:
+        """Keeps deposits and withdrawals out of P&L. Without this a deposit
+        reads as profit (2026-10-05: a Rs 1,000 deposit, +$11.76 on a $3.24
+        day, tripped the +10% profit target, flattened and halted) and a
+        withdrawal reads as a loss that trips the daily-loss and drawdown
+        halts. Each flow is applied exactly once (by id):
+
+        - today's starting equity moves by the amount if the flow came AFTER
+          it was taken (one before it is already inside it);
+        - the drawdown peak moves by the amount if the flow came after the
+          peak was last set (a peak set later already contains it). With no
+          stamp yet -- the first run after this shipped -- the peak is taken
+          to contain every flow so far, and stamped now.
+
+        Returns the flows newly applied."""
+        async with self._flows_lock:
+            return await self._apply_external_flows(flows)
+
+    async def _apply_external_flows(self, flows: list[ExternalFlow]) -> list[ExternalFlow]:
+        raw = await get_state("external_flows_applied")
+        applied: list[str] = json.loads(raw) if raw else []
+        seen = set(applied)
+        now = dt.datetime.now(dt.timezone.utc)
+        raw_hwm_at = await get_state("equity_high_water_mark_at")
+        if not raw_hwm_at:
+            raw_hwm_at = now.isoformat()
+            await set_state("equity_high_water_mark_at", raw_hwm_at)
+        hwm_at = dt.datetime.fromisoformat(raw_hwm_at)
+        day_start = dt.datetime.combine(self.daily_pnl.day, dt.time(), tzinfo=dt.timezone.utc)
+        anchored_at = self.daily_pnl.anchored_at or day_start
+
+        new: list[ExternalFlow] = []
+        for flow in sorted(flows, key=lambda f: f.time):
+            if flow.uid in seen:
+                continue
+            seen.add(flow.uid)
+            applied.append(flow.uid)
+            new.append(flow)
+            if flow.time.date() == self.daily_pnl.day and flow.time >= anchored_at and self.daily_pnl.starting_equity > 0:
+                self.daily_pnl.starting_equity = max(self.daily_pnl.starting_equity + flow.amount, 0.0)
+            if flow.time >= hwm_at:
+                raw_hwm = await get_state("equity_high_water_mark")
+                if raw_hwm:
+                    await set_state("equity_high_water_mark", str(max(float(raw_hwm) + flow.amount, 0.0)))
+            logger.info(
+                "External %s of %.2f USD at %s kept out of P&L (day start now %.2f)",
+                "deposit" if flow.amount >= 0 else "withdrawal", abs(flow.amount), flow.time.isoformat(),
+                self.daily_pnl.starting_equity,
+            )
+        if new:
+            await set_state("external_flows_applied", json.dumps(applied[-500:]))
+            await self._persist_daily_pnl_state()
+        return new
 
     async def _persist_daily_pnl_state(self) -> None:
         await set_state("daily_pnl_day", self.daily_pnl.day.isoformat())
         await set_state("daily_pnl_realized", str(self.daily_pnl.realized_pnl))
         await set_state("daily_pnl_starting_equity", str(self.daily_pnl.starting_equity))
+        if self.daily_pnl.anchored_at is not None:
+            await set_state("daily_pnl_anchored_at", self.daily_pnl.anchored_at.isoformat())
 
     async def check_daily_loss(self, equity: float) -> tuple[bool, str]:
         """Mark-to-market (realized + unrealized), not realized-only: a
@@ -82,7 +181,7 @@ class RiskManager:
         """
         self.daily_pnl.roll_if_new_day(equity)
         if self.daily_pnl.starting_equity == 0.0:
-            self.daily_pnl.starting_equity = equity
+            self.daily_pnl.anchor(equity)
         await self._persist_daily_pnl_state()
 
         if self.daily_pnl.starting_equity <= 0:
@@ -107,8 +206,14 @@ class RiskManager:
         """
         self.daily_pnl.roll_if_new_day(equity)
         if self.daily_pnl.starting_equity == 0.0:
-            self.daily_pnl.starting_equity = equity
+            self.daily_pnl.anchor(equity)
         await self._persist_daily_pnl_state()
+
+        if self.settings.daily_profit_target_pct <= 0:
+            # 0 = off. Without this, a 0 target is "any non-negative day" and
+            # halts trading on every flat or green day. (The day anchor above
+            # is still kept -- the status and exit-level displays read it.)
+            return True, ""
 
         if self.daily_pnl.starting_equity <= 0:
             return True, ""  # nothing to take a percentage of yet
@@ -144,7 +249,7 @@ class RiskManager:
         high_water_mark = float(raw_hwm) if raw_hwm else 0.0
 
         if equity > high_water_mark:
-            await set_state("equity_high_water_mark", str(equity))
+            await self.set_high_water_mark(equity)
             return True, ""
 
         if high_water_mark <= 0:
@@ -239,7 +344,16 @@ class RiskManager:
         current_portfolio_notional_usd: float,
         current_portfolio_margin_usd: float = 0.0,
         quality: float = 1.0,
+        leverage: float | None = None,
     ) -> int:
+        """`leverage` is the leverage the order will actually be placed at,
+        when the caller chose one (the book's margin leverage, see
+        Settings.book_margin_use). Margin is then measured at THAT leverage,
+        and the per-trade margin cap -- a leftover of the fixed-margin-per-trade
+        sizing, where margin was the risk unit -- no longer applies: the book
+        already sets each symbol's notional, and at 1-2x a single position's
+        margin legitimately exceeds 10% of equity. Total margin is capped at
+        book_margin_use, the same share the leverage was chosen to fit in."""
         if proposed_contracts == 0 or price <= 0:
             return 0
 
@@ -263,7 +377,9 @@ class RiskManager:
         # stamped with (see PaperBroker), so this cap and the resulting
         # position's displayed margin always agree.
         if proposed_notional > 0:
-            leverage = select_leverage(quality, self.settings.min_leverage, self.settings.max_leverage)
+            book_leverage = leverage is not None and leverage > 0
+            if not book_leverage:
+                leverage = select_leverage(quality, self.settings.min_leverage, self.settings.max_leverage)
             proposed_margin = proposed_notional / leverage
 
             # Per-trade cap FIRST: without this, one trade alone can request
@@ -274,11 +390,14 @@ class RiskManager:
             # guarantees several can coexist instead of the first one
             # winning the whole budget.
             max_single_trade_margin = equity * self.settings.max_margin_per_trade_pct
-            if proposed_margin > max_single_trade_margin:
+            if not book_leverage and proposed_margin > max_single_trade_margin:
                 proposed_notional = max_single_trade_margin * leverage
                 proposed_margin = max_single_trade_margin
 
-            max_total_margin = equity * self.settings.max_margin_utilization
+            max_total_margin = equity * (
+                max(self.settings.max_margin_utilization, self.settings.book_margin_use)
+                if book_leverage else self.settings.max_margin_utilization
+            )
             remaining_margin_budget = max(0.0, max_total_margin - current_portfolio_margin_usd)
             if proposed_margin > remaining_margin_budget:
                 scale = remaining_margin_budget / proposed_margin if proposed_margin > 0 else 0.0

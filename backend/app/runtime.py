@@ -40,6 +40,11 @@ class Runtime:
         )
         self.deadman_switch = DeadmanSwitch(self.rest_client)
         self.ensembles: dict[str, SignalEnsemble] = {}
+        # Latest blended signal per symbol, BEFORE hysteresis, written by the
+        # trading tick. This -- not a price -- is what ends a trade (there are
+        # no stop/take-profit orders, see Settings.atr_brackets_enabled), so
+        # the dashboard shows it where a stop would normally sit.
+        self.live_signals: dict[str, float] = {}
         self.ws_ingestor: WebSocketIngestor | None = None
         self._ws_task: asyncio.Task | None = None
 

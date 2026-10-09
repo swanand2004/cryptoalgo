@@ -1,0 +1,21 @@
+# Nightly crypto-ML + gold model retrain, as its OWN low-priority process (see
+# backend/app/jobs/retrain.py). The trading service runs with
+# RETRAIN_IN_PROCESS=false, so this is the only place training happens.
+[Unit]
+Description=cryptoalgo nightly model retrain (low priority)
+After=network-online.target cryptoalgo.service
+
+[Service]
+Type=oneshot
+User=cryptoalgo
+WorkingDirectory=/opt/cryptoalgo/backend
+Environment=DATABASE_URL=sqlite+aiosqlite:////opt/cryptoalgo/data/live.db
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/cryptoalgo/backend/.venv/bin/python -m app.jobs.retrain all
+# Trading always gets the CPU and disk first on the 1-core server.
+Nice=19
+CPUWeight=10
+IOSchedulingClass=idle
+# If training ever outgrows this, only THIS job is killed -- the bot is untouched.
+MemoryMax=1300M
+TimeoutStartSec=3h

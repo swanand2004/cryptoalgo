@@ -8,6 +8,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.config import is_allowed_origin
 from app.core.time_utils import to_iso_utc
 from app.data.app_state import get_trading_mode
+from app.execution.live_broker import LiveEquityUnavailable
+from app.risk.exit_levels import position_exit_levels
 from app.runtime import get_runtime_sync
 
 logger = logging.getLogger(__name__)
@@ -29,7 +31,7 @@ async def dashboard_feed(websocket: WebSocket) -> None:
     # data exposure (the socket never calls receive(), so it can't place
     # orders), but it's still a real leak worth closing off.
     origin = websocket.headers.get("origin")
-    if not is_allowed_origin(origin):
+    if not is_allowed_origin(origin, websocket.headers.get("host")):
         # Logged, not silent: a bare 403 during the handshake gives no clue
         # WHICH origin was refused, which made this genuinely hard to diagnose
         # when the dev server started advertising a LAN URL.
@@ -48,8 +50,14 @@ async def dashboard_feed(websocket: WebSocket) -> None:
         while True:
             mode = await get_trading_mode()
             positions = await runtime.order_manager.get_positions()
-            equity = await runtime.order_manager.get_equity()
+            try:
+                equity = await runtime.order_manager.get_equity()
+            except LiveEquityUnavailable:
+                equity = None  # Delta unreachable right now: show "--", keep the feed alive
             prices = {s: runtime.cache.get_last_price(s) for s in runtime.registry.symbols}
+            # Where each trade will be closed (no exchange stop): the account
+            # limits as prices -- see app/risk/exit_levels.py.
+            levels = {key: await position_exit_levels(runtime, p, equity) for key, p in positions.items()}
 
             await websocket.send_json(
                 {
@@ -70,10 +78,16 @@ async def dashboard_feed(websocket: WebSocket) -> None:
                             "fees_paid": p.fees_paid,
                             "stop_loss_price": p.stop_loss_price,
                             "take_profit_price": p.take_profit_price,
+                            # What actually closes the trade: the blended
+                            # signal fading through the exit line.
+                            "signal": runtime.live_signals.get(p.symbol),
+                            "exit_threshold": runtime.settings.signal_exit_deadband,
                             "notional_usd": p.notional_usd,
                             "margin_usd": p.margin_usd,
+                            "liquidation_price": p.liquidation_price,
+                            **levels[key],
                         }
-                        for p in positions.values()
+                        for key, p in positions.items()
                     ],
                     "system_status": runtime.cache.system_status.get("status", "unknown"),
                 }

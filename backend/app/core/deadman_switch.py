@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import httpx
+
 from app.core.delta_client import DeltaApiError, DeltaRestClient
 
 logger = logging.getLogger(__name__)
+
+NETWORK_RETRY_SECONDS = 3.0
 
 
 class DeadmanSwitch:
@@ -32,7 +36,8 @@ class DeadmanSwitch:
         self._task: asyncio.Task | None = None
         self._registered = False
 
-    async def _register(self) -> None:
+    async def _register(self) -> bool:
+        """Returns False only when the request never reached Delta."""
         try:
             await self.client.create_heartbeat(
                 {
@@ -46,6 +51,12 @@ class DeadmanSwitch:
             logger.info("Deadman switch registered: %s", self.heartbeat_id)
         except DeltaApiError as exc:
             logger.error("Failed to register deadman switch: %s", exc)
+        except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+            # Network blip (connect timeout, DNS): nothing was registered;
+            # the loop retries shortly. Must not escape -- see _loop.
+            logger.warning("Deadman switch registration did not reach Delta (%s); retrying", type(exc).__name__)
+            return False
+        return True
 
     async def _loop(self) -> None:
         while True:
@@ -56,8 +67,9 @@ class DeadmanSwitch:
             # call failing, silently) with no automatic recovery. This
             # self-heals: it keeps retrying registration at the normal
             # heartbeat cadence until it succeeds.
+            network_miss = False
             if not self._registered:
-                await self._register()
+                network_miss = not await self._register()
             if self._registered:
                 try:
                     await self.client.send_heartbeat(self.heartbeat_id, self.ttl_ms)
@@ -67,7 +79,20 @@ class DeadmanSwitch:
                     # was lost or expired server-side -- don't keep
                     # assuming it's still valid; re-register next iteration.
                     self._registered = False
-            await asyncio.sleep(self.send_interval_seconds)
+                except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+                    # A network error used to escape and END this task
+                    # ("Task exception was never retrieved", 21x on
+                    # 2026-10-06), leaving no heartbeat until the 10 s
+                    # supervisor noticed. The registration itself is still
+                    # valid, so keep it and just resend soon.
+                    logger.warning("Deadman switch heartbeat did not reach Delta (%s); retrying", type(exc).__name__)
+                    network_miss = True
+            # After a network miss, retry well inside the TTL rather than a
+            # full interval later (20 s interval + a miss overruns a 30 s TTL).
+            # API rejections keep the normal cadence, as before.
+            await asyncio.sleep(
+                min(self.send_interval_seconds, NETWORK_RETRY_SECONDS) if network_miss else self.send_interval_seconds
+            )
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -81,8 +106,8 @@ class DeadmanSwitch:
         if disable_remote and self._registered:
             try:
                 await self.client.send_heartbeat(self.heartbeat_id, 0)
-            except DeltaApiError as exc:
-                logger.warning("Failed to disable deadman switch remotely: %s", exc)
+            except (DeltaApiError, httpx.HTTPError, asyncio.TimeoutError) as exc:
+                logger.warning("Failed to disable deadman switch remotely: %r", exc)
 
     @property
     def is_running(self) -> bool:

@@ -10,6 +10,22 @@ from app.execution.broker_base import OrderRequest
 from app.execution.paper_broker import PaperBroker
 
 
+@pytest.fixture(autouse=True)
+def _enable_atr_brackets(monkeypatch):
+    """This file tests the broker's stop-loss/take-profit machinery, which is
+    disabled by default from 2026-09-07 (see Settings.atr_brackets_enabled:
+    with the live trend_ladder strategy it backtests at -100% against +968%
+    on signal exits alone, because a stop closes a position the unchanged
+    signal immediately re-opens).
+
+    That is a STRATEGY-level policy, not a defect in the machinery, and the
+    machinery must keep working for whenever a strategy wants it. So the whole
+    module opts in, rather than each test asserting against a disabled
+    feature.
+    """
+    monkeypatch.setenv("ATR_BRACKETS_ENABLED", "true")
+
+
 def _registry() -> SymbolRegistry:
     reg = SymbolRegistry(Settings(delta_api_key="k", delta_api_secret="s"))
     reg._by_symbol["BTCUSD"] = ProductInfo(

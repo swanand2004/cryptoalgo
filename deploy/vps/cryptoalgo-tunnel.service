@@ -1,0 +1,16 @@
+# Free public HTTPS URL via a Cloudflare quick tunnel (no account). The server
+# has no public IPv4 port 80/443 of its own (shared NAT IP), so the tunnel dials
+# OUT to Cloudflare instead. The URL changes when this service restarts; find it
+# with: journalctl -u cryptoalgo-tunnel | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' | tail -1
+[Unit]
+Description=cryptoalgo public tunnel (Cloudflare quick tunnel)
+After=network-online.target cryptoalgo.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

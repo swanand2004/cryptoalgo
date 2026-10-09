@@ -239,3 +239,81 @@ class AppState(Base):
     key: Mapped[str] = mapped_column(String(32), primary_key=True)
     value: Mapped[str] = mapped_column(String(256))
     updated_at: Mapped[dt.datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+class AnalystTrade(Base):
+    """A PAPER trade taken by the rules-based Analyst (app/analyst): opened when
+    a scheduled analysis says BUY/SELL and no trade is open on that symbol,
+    closed ONLY at its stop or target. Never sent to an exchange -- it is the
+    forward record that decides whether the Analyst deserves real money."""
+
+    __tablename__ = "analyst_trades"
+    __table_args__ = (Index("ix_analyst_trades_symbol_open", "symbol", "is_open"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(8))  # "BUY" | "SELL"
+    conviction: Mapped[int] = mapped_column(Integer)
+    score: Mapped[float] = mapped_column(Float)
+    size_factor: Mapped[float] = mapped_column(Float, default=1.0)
+    entry_time: Mapped[dt.datetime] = mapped_column(default=_utcnow)
+    entry: Mapped[float] = mapped_column(Float)
+    stop_loss: Mapped[float] = mapped_column(Float)
+    take_profit: Mapped[float] = mapped_column(Float)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    exit_time: Mapped[dt.datetime] = mapped_column(nullable=True)
+    exit_price: Mapped[float] = mapped_column(Float, nullable=True)
+    result: Mapped[str] = mapped_column(String(8), nullable=True)  # "TP" | "SL"
+    r_multiple: Mapped[float] = mapped_column(Float, nullable=True)  # net of 7 bps/side
+    reasons: Mapped[dict] = mapped_column(JSON, default=dict)  # the analysis it was taken on
+    # Live execution (Settings.trading_engine = "analyst") and the dynamic exit.
+    live: Mapped[bool] = mapped_column(Boolean, default=False)  # True = a real Delta order
+    contracts: Mapped[int] = mapped_column(Integer, default=0)
+    initial_stop: Mapped[float] = mapped_column(Float, nullable=True)  # the stop at entry (1R)
+    atr: Mapped[float] = mapped_column(Float, nullable=True)  # daily ATR at entry
+    peak: Mapped[float] = mapped_column(Float, nullable=True)  # best price since entry
+    extended: Mapped[bool] = mapped_column(Boolean, default=False)  # ran past TP1 on a still-strong call
+    # Shadow variants (Settings.analyst_shadow_variants): NULL = the real Analyst record;
+    # "base" / "C" / "B" / "CB" = a paper-only forward test of a candidate rule. Never ordered,
+    # never counted in the live stats (app/analyst/execution.py, shadow section).
+    variant: Mapped[str] = mapped_column(String(8), nullable=True, default=None)
+
+
+class OptionsPaperTrade(Base):
+    """One week of the PAPER "S7" options tracker (app/options/s7.py). Every
+    Friday 12:00 UTC per underlying (BTC, ETH) it records the trend-book signal
+    and the decision -- buy the ~7-day 0.40-delta call, the -0.40-delta put, or
+    nothing -- then holds the option to expiry and settles it at intrinsic
+    value. Never sent to an exchange: it is the forward record that decides
+    whether S7 ever deserves real money. Weeks with no trade are stored too
+    (decision "NONE") so the record shows every signal, not only the trades."""
+
+    __tablename__ = "options_paper_trades"
+    __table_args__ = (Index("ux_options_paper_week_underlying", "week", "underlying", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week: Mapped[str] = mapped_column(String(10))  # entry date YYYY-MM-DD (the Friday)
+    underlying: Mapped[str] = mapped_column(String(8))  # "BTC" | "ETH"
+    signal: Mapped[float] = mapped_column(Float, nullable=True)
+    signal_source: Mapped[str] = mapped_column(String(16), nullable=True)  # "live" | "trend_ladder"
+    decision: Mapped[str] = mapped_column(String(8))  # "CALL" | "PUT" | "NONE"
+    note: Mapped[str] = mapped_column(String(256), nullable=True)
+    entry_time: Mapped[dt.datetime] = mapped_column(default=_utcnow)
+    symbol: Mapped[str] = mapped_column(String(40), nullable=True)  # e.g. C-BTC-90000-161026
+    strike: Mapped[float] = mapped_column(Float, nullable=True)
+    expiry: Mapped[dt.datetime] = mapped_column(nullable=True)
+    contract_value: Mapped[float] = mapped_column(Float, nullable=True)  # underlying units per contract
+    spot_at_entry: Mapped[float] = mapped_column(Float, nullable=True)
+    delta_at_entry: Mapped[float] = mapped_column(Float, nullable=True)
+    iv_at_entry: Mapped[float] = mapped_column(Float, nullable=True)
+    premium: Mapped[float] = mapped_column(Float, nullable=True)  # price per 1 underlying unit
+    premium_source: Mapped[str] = mapped_column(String(8), nullable=True)  # "ask" | "mark"
+    entry_fee: Mapped[float] = mapped_column(Float, nullable=True)  # USD, incl. 18% GST
+    is_open: Mapped[bool] = mapped_column(Boolean, default=False)
+    settled_at: Mapped[dt.datetime] = mapped_column(nullable=True)
+    underlying_at_expiry: Mapped[float] = mapped_column(Float, nullable=True)
+    settle_value: Mapped[float] = mapped_column(Float, nullable=True)  # intrinsic per 1 underlying unit
+    settle_source: Mapped[str] = mapped_column(String(16), nullable=True)  # "delta" | "binance_1h"
+    settle_fee: Mapped[float] = mapped_column(Float, nullable=True)  # USD, 0 when it expires worthless
+    pnl_usd: Mapped[float] = mapped_column(Float, nullable=True)  # net of both fees, per 1 contract
+    pnl_pct: Mapped[float] = mapped_column(Float, nullable=True)  # pnl / (premium paid + entry fee)

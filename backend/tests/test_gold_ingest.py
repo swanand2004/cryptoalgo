@@ -86,32 +86,101 @@ async def test_gold_deep_backfill_skips_resolutions_that_already_have_history(mo
 
 
 @pytest.mark.asyncio
-async def test_gold_deep_backfill_pulls_and_stores_history_for_an_empty_resolution(monkeypatch):
-    async def _fake_fetch(timeframe, since_ms, max_batches=400):
-        return [{"time": i * 86400, "open": 4500.0, "high": 4510.0, "low": 4490.0, "close": 4505.0, "volume": 3.0} for i in range(50)]
+async def test_gold_deep_backfill_splices_paxg_history_onto_delta_xaut(monkeypatch):
+    """Empty series: PAXG bars strictly BEFORE XAUT's first Delta bar, Delta
+    XAUTUSD from that bar on -- one continuous series under GOLD_SPOT_SYMBOL."""
+    day = 86_400
+    xaut_start = 100 * day
 
-    monkeypatch.setattr(ingest_mod, "_fetch_ohlcv_since", _fake_fetch)
+    async def _fake_delta(resolution, since_s, until_s=None):
+        return [{"time": xaut_start + i * day, "open": 4600.0, "high": 4610.0, "low": 4590.0,
+                 "close": 4605.0, "volume": 9.0} for i in range(20)]
+
+    async def _fake_binance(timeframe, since_ms, max_batches=400, until_ms=None):
+        # Binance would also return bars at/after the splice -- they must not be used
+        return [{"time": i * day, "open": 4500.0, "high": 4510.0, "low": 4490.0, "close": 4505.0, "volume": 3.0}
+                for i in range(120) if until_ms is None or i * day * 1000 < until_ms]
+
+    monkeypatch.setattr(ingest_mod, "_fetch_delta_since", _fake_delta)
+    monkeypatch.setattr(ingest_mod, "_fetch_ohlcv_since", _fake_binance)
 
     await gold_deep_backfill()
 
     stored = await load_candles_df(GOLD_SPOT_SYMBOL, "1d", limit=1000)
-    assert len(stored) == 50
-    assert stored["close"].iloc[0] == 4505.0
+    assert len(stored) == 120
+    before = stored[stored["time"] < xaut_start]
+    after = stored[stored["time"] >= xaut_start]
+    assert len(before) == 100 and (before["close"] == 4505.0).all()  # PAXG history
+    assert len(after) == 20 and (after["close"] == 4605.0).all()  # Delta XAUT from its first bar
 
 
 @pytest.mark.asyncio
-async def test_gold_incremental_backfill_covers_every_resolution(monkeypatch):
-    seen_timeframes = []
+async def test_gold_deep_backfill_reuses_stored_paxg_rows_instead_of_refetching(monkeypatch):
+    from app.data.ingest_rest import upsert_candles
 
-    async def _fake_fetch(timeframe, since_ms, max_batches=400):
-        seen_timeframes.append(timeframe)
+    day = 86_400
+    paxg = [{"time": i * day, "open": 4400.0, "high": 4410.0, "low": 4390.0, "close": 4401.0, "volume": 1.0}
+            for i in range(1200)]
+    await upsert_candles(ingest_mod.PAXG_HISTORY_SYMBOL, "1d", paxg)
+
+    async def _fake_delta(resolution, since_s, until_s=None):
+        return [{"time": 1100 * day + i * day, "open": 4600.0, "high": 4610.0, "low": 4590.0,
+                 "close": 4605.0, "volume": 9.0} for i in range(5)] if resolution == "1d" else []
+
+    async def _fail_if_called(*args, **kwargs):
+        if args and args[0] == "1d":
+            raise AssertionError("stored PAXG daily history must be reused, not refetched")
+        return []
+
+    monkeypatch.setattr(ingest_mod, "_fetch_delta_since", _fake_delta)
+    monkeypatch.setattr(ingest_mod, "_fetch_ohlcv_since", _fail_if_called)
+
+    await gold_deep_backfill()
+
+    stored = await load_candles_df(GOLD_SPOT_SYMBOL, "1d", limit=10_000)
+    assert len(stored) == 1105  # 1100 PAXG rows before the splice + 5 XAUT
+    assert stored["close"].iloc[-1] == 4605.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_delta_since_pages_forward_and_returns_oldest_first(monkeypatch):
+    import httpx
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        q = request.url.params
+        assert q["symbol"] == "XAUTUSD"
+        start, end = int(q["start"]), int(q["end"])
+        seen.append((start, end))
+        bars = [{"time": t, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 3}
+                for t in range(start, end, 3600)]
+        return httpx.Response(200, json={"result": list(reversed(bars))})  # Delta: newest first
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(ingest_mod.httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(ingest_mod, "_DELTA_PAGE_BARS", 10)
+
+    rows = await ingest_mod._fetch_delta_since("1h", since_s=0, until_s=25 * 3600)
+
+    assert [r["time"] for r in rows] == [i * 3600 for i in range(25)]
+    assert seen == [(0, 36_000), (36_000, 72_000), (72_000, 90_000)]
+
+
+@pytest.mark.asyncio
+async def test_gold_incremental_backfill_covers_every_resolution_from_delta(monkeypatch):
+    seen = []
+
+    async def _fake_delta(resolution, since_s, until_s=None):
+        seen.append(resolution)
         return [{"time": 1_700_000_000, "open": 4500.0, "high": 4501.0, "low": 4499.0, "close": 4500.5, "volume": 2.0}]
 
-    monkeypatch.setattr(ingest_mod, "_fetch_ohlcv_since", _fake_fetch)
+    monkeypatch.setattr(ingest_mod, "_fetch_delta_since", _fake_delta)
 
     await gold_incremental_backfill()
 
-    assert set(seen_timeframes) == {"15m", "1h", "1d"}
+    assert set(seen) == {"15m", "1h", "1d"}
     for resolution in ingest_mod.GOLD_RESOLUTIONS:
         stored = await load_candles_df(GOLD_SPOT_SYMBOL, resolution, limit=10)
         assert len(stored) == 1

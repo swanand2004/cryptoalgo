@@ -16,6 +16,14 @@ backend/*.db
 backend/*.db-shm
 backend/*.db-wal
 backend/*.sqlite3
+# The deploy copy is a 73 MB build artefact rebuilt by deploy/slim_db.py, and
+# it carries live positions and equity history -- never commit it.
+deploy/*.db
+deploy/*.db-shm
+deploy/*.db-wal
+# Backups of .env hold real API secrets; *.env above misses this shape.
+*.env.bak*
+.env.bak*
 backend/app/ml/model_store/*.pkl
 backend/app/ml/model_store/*.txt
 !backend/app/ml/model_store/.gitkeep
@@ -39,3 +47,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Rotated logs, the single-instance lock, local Claude state, the Analyst's
+# training store (rebuilt on the server).
+*.log.*
+*.db.lock
+.claude/
+backend/app/analyst/model_store/

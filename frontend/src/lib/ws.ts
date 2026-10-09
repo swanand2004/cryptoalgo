@@ -1,25 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
+import type { Position } from './api'
 
 export interface DashboardSnapshot {
   type: 'snapshot'
   mode: string
-  equity: number
+  equity: number | null // null while Delta's balance can't be read
   prices: Record<string, number | null>
-  positions: {
-    symbol: string
-    size: number
-    entry_price: number
-    unrealized_pnl: number
-    realized_pnl: number
-    strategy: string | null
-    entry_time: string | null
-    leverage: number | null
-    fees_paid: number
-    stop_loss_price: number | null
-    take_profit_price: number | null
-    notional_usd: number
-    margin_usd: number
-  }[]
+  // Same shape as GET /api/trading/positions (see Position in api.ts).
+  positions: Position[]
   system_status: string
 }
 

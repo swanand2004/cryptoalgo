@@ -1,0 +1,47 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: cryptoalgo
+    restart: unless-stopped        # survives reboots and crashes
+    env_file:
+      - ./.env                     # copy backend/.env here; never commit it
+    environment:
+      DATABASE_URL: "sqlite+aiosqlite:////data/live.db"
+      # The book's one risk dial. Set it HERE rather than in code so changing
+      # size is a restart, not a redeploy.
+      BOOK_TARGET_VOL: "0.50"
+      # Required, not optional: deploy/.env is also what compose reads for
+      # ${...} below, so a missing password stops `up` with this message
+      # instead of quietly publishing an API that can switch the book to live.
+      DASHBOARD_PASSWORD: "${DASHBOARD_PASSWORD:?put DASHBOARD_PASSWORD=... in deploy/.env}"
+      PUBLIC_ORIGINS: "${PUBLIC_ORIGINS:-}"
+    volumes:
+      - trading-data:/data
+    ports:
+      # Still loopback only. The public URL comes from the cloudflared
+      # service below, which dials OUT to Cloudflare -- no inbound port is
+      # opened on the VM, so there is no firewall rule to get wrong.
+      - "127.0.0.1:8000:8000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"            # a chatty 60s loop fills a small disk fast
+        max-file: "5"
+
+  # Free public HTTPS URL via Cloudflare Tunnel. Opt-in:
+  #   docker compose --profile public up -d
+  # With CLOUDFLARE_TUNNEL_TOKEN set you get your own fixed hostname; see
+  # README "Public 24/7 site".
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cryptoalgo-tunnel
+    profiles: ["public"]
+    restart: unless-stopped
+    depends_on: [backend]
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-missing-token-see-README}
+    network_mode: "service:backend"   # reaches the app at localhost:8000
+
+volumes:
+  trading-data:

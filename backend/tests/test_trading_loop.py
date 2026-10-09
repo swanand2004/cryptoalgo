@@ -180,6 +180,20 @@ class _ConstantSignalStrategy(Strategy):
         return 5
 
 
+class _DeepWarmupStrategy(_ConstantSignalStrategy):
+    """A strategy whose warm-up is far longer than Delta's own frames.
+
+    trend_ladder needs 6,400 hourly bars; the loop's Delta feature frames hold
+    400 fifteen-minute ones. Those two numbers describe different series and
+    must never be compared -- doing so was a real bug (2026-09-07): the loop
+    returned before placing a single order, silently, on every tick, and no
+    unit test caught it because every test double had a small warm-up.
+    """
+
+    def required_warmup_bars(self) -> int:
+        return 6400
+
+
 class _FullFakeRuntime:
     """Unlike _FakeRuntime above (used for the read-only get_live_signals
     tests), this one has a REAL order_manager wired to a real PaperBroker --
@@ -189,6 +203,10 @@ class _FullFakeRuntime:
     def __init__(self, registry, ensembles, settings) -> None:
         self.registry = registry
         self.ensembles = ensembles
+        # These tests check sizing/consolidation arithmetic on an immediate
+        # fill. Maker execution would leave the order resting in the book;
+        # it has its own tests in test_maker_execution.py.
+        settings.maker_execution = "off"
         self.settings = settings
         self.cache = MarketDataCache()
         self.cache.update_orderbook("TESTUSD", bids=[[999.0, 100]], asks=[[1001.0, 100]], timestamp=1)
@@ -221,6 +239,29 @@ async def _seed_testusd_candles(n: int = 300, seed: int = 3) -> None:
         await session.commit()
 
 
+# As of 2026-09-07 _tick_symbol takes its SIGNAL from a deep hourly frame and
+# its SIZE from a book-level volatility scalar, both computed once per tick
+# across every symbol (see trading_loop._build_ladder_frames). These tests are
+# about consolidation and relative sizing, and their strategies emit a constant
+# signal, so any correctly-shaped frame serves -- but they must go through the
+# real production path rather than a bypass, or they stop testing what ships.
+TEST_BOOK_SCALAR = 1.0
+
+
+async def _tick_kwargs(weight: float = 1.0) -> dict:
+    from app.data.query import load_candles_df
+    from app.features.feature_pipeline import build_feature_frame
+
+    candles = await load_candles_df("TESTUSD", "15m", limit=400)
+    frame = build_feature_frame(candles)
+    frame["funding_rate"] = 0.0
+    return {
+        "ladder_frame": frame,
+        "book_scalar": TEST_BOOK_SCALAR,
+        "weight": weight,
+    }
+
+
 @pytest.mark.asyncio
 async def test_multiple_strategies_produce_exactly_one_blended_position():
     """The core of the 2026-08-31 consolidation: however many strategies are
@@ -243,7 +284,7 @@ async def test_multiple_strategies_produce_exactly_one_blended_position():
     )
 
     runtime = _FullFakeRuntime(registry, {"TESTUSD": ensemble}, settings)
-    await _tick_symbol(runtime, "TESTUSD")
+    await _tick_symbol(runtime, "TESTUSD", **await _tick_kwargs())
 
     positions = await runtime.order_manager.get_positions()
     testusd = {k: v for k, v in positions.items() if k.startswith("TESTUSD:") and v.size != 0}
@@ -252,6 +293,57 @@ async def test_multiple_strategies_produce_exactly_one_blended_position():
     assert f"TESTUSD:{CONSOLIDATED_STRATEGY}" in testusd
     assert "TESTUSD:weak_long" not in positions
     assert "TESTUSD:strong_long" not in positions
+
+
+@pytest.mark.asyncio
+async def test_a_deep_warmup_strategy_still_trades_off_short_delta_frames():
+    """Regression, 2026-09-07. The signal's warm-up is satisfied by the deep
+    hourly ladder frame; Delta's short frames only supply the stop ATR and a
+    fallback price. Gating the tick on the strategy's warm-up against those
+    short frames makes the condition unsatisfiable, and the loop stops trading
+    without a single error in the log.
+    """
+    await _seed_testusd_candles()
+    settings = _consolidation_settings()
+    registry = _registry_with_testusd()
+
+    deep = _DeepWarmupStrategy("deep_warmup", 0.8)
+    ensemble = SignalEnsemble([WeightedStrategy(deep, weight=1.0, enabled=True)])
+    assert ensemble.warmup_bars() == 6400
+
+    runtime = _FullFakeRuntime(registry, {"TESTUSD": ensemble}, settings)
+    await _tick_symbol(runtime, "TESTUSD", **await _tick_kwargs())
+
+    positions = await runtime.order_manager.get_positions()
+    held = positions.get(f"TESTUSD:{CONSOLIDATED_STRATEGY}")
+    assert held is not None and held.size != 0, (
+        "loop refused to trade a strategy whose warm-up exceeds Delta's frame length"
+    )
+
+
+@pytest.mark.asyncio
+async def test_atr_brackets_are_off_by_default_for_the_trend_book():
+    """Measured, not stylistic: with the ATR stop/take-profit enabled this
+    strategy backtests at -100% over 2017-2026 against +968% on signal exits
+    alone. A stop closes a position the unchanged signal immediately re-opens,
+    so the pair churns -- 3389 trades against 1030 -- crystallising a loss and
+    paying two more fees each time. See Settings.atr_brackets_enabled.
+    """
+    await _seed_testusd_candles()
+    settings = _consolidation_settings()
+    assert settings.atr_brackets_enabled is False, "brackets must default OFF"
+    registry = _registry_with_testusd()
+
+    strat = _ConstantSignalStrategy("solo_long", 0.8)
+    ensemble = SignalEnsemble([WeightedStrategy(strat, weight=1.0, enabled=True)])
+    runtime = _FullFakeRuntime(registry, {"TESTUSD": ensemble}, settings)
+
+    await _tick_symbol(runtime, "TESTUSD", **await _tick_kwargs())
+
+    held = (await runtime.order_manager.get_positions())[f"TESTUSD:{CONSOLIDATED_STRATEGY}"]
+    assert held.size != 0
+    assert held.stop_loss_price is None, "a stop was set despite brackets being disabled"
+    assert held.take_profit_price is None, "a take-profit was set despite brackets being disabled"
 
 
 @pytest.mark.asyncio
@@ -275,7 +367,7 @@ async def test_legacy_per_member_positions_are_closed_on_consolidation():
     )
     assert (await runtime.order_manager.get_positions())["TESTUSD:trend_momentum"].size == 50
 
-    await _tick_symbol(runtime, "TESTUSD")
+    await _tick_symbol(runtime, "TESTUSD", **await _tick_kwargs())
 
     positions = await runtime.order_manager.get_positions()
     assert "TESTUSD:trend_momentum" not in positions, "legacy member position was left orphaned"
@@ -315,17 +407,21 @@ async def test_consolidated_position_is_sized_as_one_trade_not_a_sum_of_members(
     equity = await runtime.order_manager.get_equity()
 
     # What each member would have targeted ON ITS OWN under the old design.
+    # Sized through the same book scalar the consolidated tick uses, so this
+    # compares one bet against two -- not one sizing mode against another.
     _, weak_target, _ = _compute_member_target(
         runtime, product, features, price, {}, equity, strategy_name="weak_long",
         signal_ensemble=SignalEnsemble([WeightedStrategy(weak_long, weight=1.0)]),
+        book_scalar=TEST_BOOK_SCALAR, weight=1.0,
     )
     _, strong_target, _ = _compute_member_target(
         runtime, product, features, price, {}, equity, strategy_name="strong_long",
         signal_ensemble=SignalEnsemble([WeightedStrategy(strong_long, weight=1.0)]),
+        book_scalar=TEST_BOOK_SCALAR, weight=1.0,
     )
     naive_sum = abs(weak_target) + abs(strong_target)
 
-    await _tick_symbol(runtime, "TESTUSD")
+    await _tick_symbol(runtime, "TESTUSD", **await _tick_kwargs())
     positions = await runtime.order_manager.get_positions()
     size = abs(positions[f"TESTUSD:{CONSOLIDATED_STRATEGY}"].size)
 
@@ -353,7 +449,7 @@ async def test_position_is_tagged_consolidated_not_by_member_name():
     ensemble = SignalEnsemble([WeightedStrategy(only_strategy, weight=1.0, enabled=True)])
     runtime = _FullFakeRuntime(registry, {"TESTUSD": ensemble}, settings)
 
-    await _tick_symbol(runtime, "TESTUSD")
+    await _tick_symbol(runtime, "TESTUSD", **await _tick_kwargs())
 
     positions = await runtime.order_manager.get_positions()
     assert "TESTUSD:solo_long" not in positions

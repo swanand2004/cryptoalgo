@@ -7,8 +7,10 @@ from app.config import get_settings
 from app.data.db import SessionLocal
 from app.data.models import StrategyConfig
 from app.strategy.ensemble import SignalEnsemble, WeightedStrategy
+from app.strategy.gann_angle import GannAngleStrategy
 from app.strategy.graha import GrahaStrategy
 from app.strategy.time_series_momentum import TimeSeriesMomentumStrategy
+from app.strategy.trend_ladder import TrendLadderStrategy
 from app.strategy.trend_momentum import TrendMomentumStrategy
 
 # Final, deliberately narrow lineup (decided 2026-08-21): exactly 3
@@ -60,10 +62,55 @@ from app.strategy.trend_momentum import TrendMomentumStrategy
 # funding_carry is NOT in that list despite being cut from the ensemble: it is
 # still active research, priced live by funding_carry_options.py, and is kept
 # deliberately. ensemble.py is core machinery, not a strategy.
+# --------------------------------------------------------------------------
+# 2026-09-07: the lineup above is superseded by a single strategy.
+#
+# `trend_ladder` (app/strategy/trend_ladder.py) is the configuration selected
+# by the nine-year cross-symbol study: chosen on a 2022-2023 validation window,
+# confirmed by rolling annual walk-forward, and evaluated once on a 2024-2026
+# holdout. On BTC/ETH/SOL as one book, net of 7bps a side and real funding, at
+# a matched 15% vol target it scores Sharpe 1.33 / PF 2.31 / maxDD -16.3% and
+# is positive in all nine calendar years.
+#
+# It runs ALONE rather than blended with the previous three, and that is the
+# deliberate part. The study's core finding is that averaging a validated
+# signal with unvalidated ones destroys it -- the same dilution effect already
+# recorded for the gold blend, where an equal-weight composite scored 44.6%
+# against its own best component's 54.4%. trend_momentum, graha and tsmom have
+# never been measured on this book, these costs, or this three-way split, so
+# giving them weight would trade a measured 1.33 Sharpe for an unmeasured one.
+#
+# The three are NOT deleted -- their modules and imports are untouched and
+# reverting is this dict, nothing else:
+#
+#     DEFAULT_WEIGHTS = {"trend_momentum": 1.0, "graha": 0.4, "tsmom": 0.8}
+#
+# Note that seed_default_strategy_configs deletes config rows for any strategy
+# not named here, so switching this dict genuinely stops the others trading
+# rather than leaving them enabled in the database.
+#
+# graha in particular was an explicit, informed user override kept on its
+# backtest numbers alone. It is set aside here on the same principle that
+# justified keeping it -- judge on measurement -- not on priors about
+# astrology: its backtest predates the 2026-08-31 engine fixes, which inflated
+# every result by 30-50x, and it has never been re-measured since.
+#
+# 2026-10-02: gann_angle (W.D. Gann's 1x1 angle off his 2-day swing chart)
+# joins at EQUAL weight -- a 50/50 signal blend, since the ensemble normalises
+# by total weight. Equal rather than 0.5/0.5 because an existing database row
+# keeps trend_ladder's stored 1.0 (seeding never overwrites), and 1.0/0.5
+# would silently run a 67/33 blend nobody tested. Shipped code path, hourly,
+# live thresholds, 7 bps + funding, 50% vol book:
+#
+#                    TRAIN <=2021      VAL 2022-23      TEST 2024-26
+#   ladder alone     1.58 / -34%       0.85 / -45%      0.92 / -43%    (Sharpe / maxDD)
+#   ladder + gann    1.56 / -31%       1.10 / -31%      1.14 / -35%
+#
+# 50/50 was fixed before testing, not tuned. See app/strategy/gann_angle.py for
+# the Gann methods that were tested and rejected. Reverting is this dict.
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "trend_momentum": 1.0,
-    "graha": 0.4,
-    "tsmom": 0.8,
+    "trend_ladder": 1.0,
+    "gann_angle": 1.0,
 }
 
 
@@ -96,12 +143,21 @@ async def build_ensemble_for_symbol(symbol: str, ml_resolution: str = "15m") -> 
             return DEFAULT_WEIGHTS.get(name, 0.0), True
         return cfg.weight, cfg.enabled
 
+    available: dict[str, object] = {
+        "trend_ladder": TrendLadderStrategy(),
+        "gann_angle": GannAngleStrategy(),
+        # Retained and constructible so flipping DEFAULT_WEIGHTS back is a
+        # one-line change, but not wired in unless named there.
+        "trend_momentum": TrendMomentumStrategy(),
+        "graha": GrahaStrategy(symbol=symbol),
+        "tsmom": TimeSeriesMomentumStrategy(),
+    }
+
     members = []
-    for name, strategy in [
-        ("trend_momentum", TrendMomentumStrategy()),
-        ("graha", GrahaStrategy(symbol=symbol)),
-        ("tsmom", TimeSeriesMomentumStrategy()),
-    ]:
+    for name in DEFAULT_WEIGHTS:
+        strategy = available.get(name)
+        if strategy is None:
+            continue
         weight, enabled = weight_of(name)
         members.append(WeightedStrategy(strategy=strategy, weight=weight, enabled=enabled))
 

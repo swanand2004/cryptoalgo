@@ -3,10 +3,18 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import { CandleChart } from '../components/CandleChart'
 import { StatCard } from '../components/StatCard'
+import { Empty, ErrorState, Loading, Panel } from '../components/ui'
+import { useIsPhone } from '../lib/hooks'
+import { fmtPrice } from '../lib/format'
 
 const RESOLUTIONS = ['1m', '5m', '15m', '1h', '4h', '1d']
 
+function usd(v: number | null | undefined): string {
+  return v ? `$${fmtPrice(v)}` : '--'
+}
+
 export default function Markets() {
+  const isPhone = useIsPhone()
   const symbolsQuery = useQuery({ queryKey: ['symbols'], queryFn: api.symbols })
   const [symbol, setSymbol] = useState<string | null>(null)
   const [resolution, setResolution] = useState('15m')
@@ -34,30 +42,43 @@ export default function Markets() {
 
   const t = tickerQuery.data
   const funding = t?.funding_rate?.funding_rate
+  const chartHeight = isPhone ? 280 : 360
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      <div className="flex flex-wrap items-center gap-2">
-        {(symbolsQuery.data ?? []).map((p) => (
-          <button
-            key={p.symbol}
-            onClick={() => setSymbol(p.symbol)}
-            className={`px-3 py-1.5 rounded-md text-sm font-medium border ${
-              activeSymbol === p.symbol
-                ? 'bg-emerald-600 border-emerald-500 text-white'
-                : 'border-neutral-700 text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            {p.symbol}
-          </button>
-        ))}
-        <div className="ml-auto flex gap-1">
+    <div className="mx-auto max-w-7xl space-y-4 sm:space-y-6">
+      {symbolsQuery.isError && (
+        <ErrorState what="the symbol list" error={symbolsQuery.error} onRetry={() => symbolsQuery.refetch()} />
+      )}
+      {symbolsQuery.isLoading && <Loading className="h-9" label="Loading symbols" />}
+
+      <div className="space-y-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2 sm:space-y-0">
+        {/* Symbols scroll sideways inside their own row on a phone. */}
+        <div role="group" aria-label="Symbol" className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:flex-wrap sm:px-0 sm:pb-0">
+          {(symbolsQuery.data ?? []).map((p) => (
+            <button
+              key={p.symbol}
+              type="button"
+              aria-pressed={activeSymbol === p.symbol}
+              onClick={() => setSymbol(p.symbol)}
+              className={`shrink-0 rounded-md border px-3 py-1.5 text-sm font-medium ${
+                activeSymbol === p.symbol
+                  ? 'border-emerald-500 bg-emerald-600 text-white'
+                  : 'border-neutral-700 text-neutral-300 hover:text-neutral-100'
+              }`}
+            >
+              {p.symbol}
+            </button>
+          ))}
+        </div>
+        <div role="group" aria-label="Candle size" className="flex gap-1 sm:ml-auto">
           {RESOLUTIONS.map((r) => (
             <button
               key={r}
+              type="button"
+              aria-pressed={resolution === r}
               onClick={() => setResolution(r)}
-              className={`px-2.5 py-1 rounded text-xs font-medium ${
-                resolution === r ? 'bg-neutral-800 text-neutral-100' : 'text-neutral-500 hover:text-neutral-300'
+              className={`rounded px-2.5 py-1.5 text-xs font-medium ${
+                resolution === r ? 'bg-neutral-700 text-neutral-50' : 'text-neutral-400 hover:text-neutral-200'
               }`}
             >
               {r}
@@ -68,70 +89,71 @@ export default function Markets() {
 
       {activeSymbol && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard label="Last Price" value={t?.last_price ? `$${t.last_price.toLocaleString()}` : '--'} />
-            <StatCard label="Mark Price" value={t?.mark_price ? `$${t.mark_price.toLocaleString()}` : '--'} />
-            <StatCard label="Spot Price" value={t?.spot_price ? `$${t.spot_price.toLocaleString()}` : '--'} />
+          {tickerQuery.isError && <ErrorState what={`the ${activeSymbol} ticker`} error={tickerQuery.error} />}
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4 md:gap-4">
+            <StatCard label="Last price" value={usd(t?.last_price)} />
+            <StatCard label="Mark price" value={usd(t?.mark_price)} />
+            <StatCard label="Spot price" value={usd(t?.spot_price)} />
             <StatCard
-              label="Funding Rate"
+              label="Funding rate"
               value={funding !== undefined && funding !== null ? `${(funding * 100).toFixed(4)}%` : '--'}
               tone={funding ? (funding > 0 ? 'positive' : 'negative') : 'default'}
             />
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <div className="lg:col-span-2 rounded-lg border border-neutral-800 bg-neutral-900 p-4">
-              <div className="text-sm font-medium text-neutral-300 mb-3">
-                {activeSymbol} &middot; {resolution}
-              </div>
-              {candlesQuery.data && candlesQuery.data.length > 0 ? (
-                <CandleChart candles={candlesQuery.data} />
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <Panel title={`${activeSymbol} · ${resolution}`} className="lg:col-span-2" bodyClassName="p-2 sm:p-4">
+              {candlesQuery.isError ? (
+                <ErrorState what="candles" error={candlesQuery.error} onRetry={() => candlesQuery.refetch()} />
+              ) : candlesQuery.isLoading ? (
+                <Loading className={isPhone ? 'h-[280px]' : 'h-[360px]'} label="Loading candles" />
+              ) : candlesQuery.data && candlesQuery.data.length > 0 ? (
+                <CandleChart candles={candlesQuery.data} height={chartHeight} />
               ) : (
-                <div className="h-[360px] flex items-center justify-center text-neutral-600 text-sm">
-                  Loading candles...
-                </div>
+                <Empty>No candles for this symbol yet</Empty>
               )}
-            </div>
+            </Panel>
 
-            <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
-              <div className="text-sm font-medium text-neutral-300 mb-3">Order Book</div>
-              {orderbookQuery.data ? (
-                <div className="grid grid-cols-2 gap-3 text-xs font-mono">
-                  <div>
-                    <div className="text-neutral-500 mb-1">Bids</div>
+            <Panel title="Order book">
+              {orderbookQuery.isError ? (
+                <ErrorState what="the order book" error={orderbookQuery.error} />
+              ) : orderbookQuery.isLoading ? (
+                <Loading className="h-[200px]" label="Loading order book" />
+              ) : orderbookQuery.data ? (
+                <div className="grid grid-cols-2 gap-3 font-mono text-xs tabular-nums">
+                  <div className="min-w-0">
+                    <div className="mb-1 font-sans text-neutral-400">Bids</div>
                     {orderbookQuery.data.bids.slice(0, 10).map(([price, size]) => (
-                      <div key={price} className="flex justify-between text-emerald-400 py-0.5">
-                        <span>{price.toFixed(2)}</span>
-                        <span className="text-neutral-500">{size.toFixed(0)}</span>
+                      <div key={price} className="flex justify-between gap-2 py-0.5 text-emerald-400">
+                        <span className="truncate">{fmtPrice(price)}</span>
+                        <span className="text-neutral-400">{size.toFixed(0)}</span>
                       </div>
                     ))}
                   </div>
-                  <div>
-                    <div className="text-neutral-500 mb-1">Asks</div>
+                  <div className="min-w-0">
+                    <div className="mb-1 font-sans text-neutral-400">Asks</div>
                     {orderbookQuery.data.asks.slice(0, 10).map(([price, size]) => (
-                      <div key={price} className="flex justify-between text-red-400 py-0.5">
-                        <span>{price.toFixed(2)}</span>
-                        <span className="text-neutral-500">{size.toFixed(0)}</span>
+                      <div key={price} className="flex justify-between gap-2 py-0.5 text-red-400">
+                        <span className="truncate">{fmtPrice(price)}</span>
+                        <span className="text-neutral-400">{size.toFixed(0)}</span>
                       </div>
                     ))}
                   </div>
-                  <div className="col-span-2 pt-2 mt-1 border-t border-neutral-800 text-neutral-400">
+                  <div className="col-span-2 mt-1 border-t border-neutral-800 pt-2 font-sans text-neutral-300">
                     Imbalance:{' '}
                     {orderbookQuery.data.imbalance !== null ? (
-                      <span className={orderbookQuery.data.imbalance >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      <span className={`font-mono ${orderbookQuery.data.imbalance >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {(orderbookQuery.data.imbalance * 100).toFixed(1)}%
                       </span>
                     ) : (
-                      <span className="text-neutral-600">--</span>
+                      <span className="text-neutral-400">--</span>
                     )}
                   </div>
                 </div>
               ) : (
-                <div className="h-[200px] flex items-center justify-center text-neutral-600 text-sm">
-                  No book data yet
-                </div>
+                <Empty>No book data yet</Empty>
               )}
-            </div>
+            </Panel>
           </div>
         </>
       )}

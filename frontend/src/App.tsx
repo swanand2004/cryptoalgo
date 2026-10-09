@@ -2,10 +2,10 @@ import { Routes, Route } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import Markets from './pages/Markets'
-import Strategies from './pages/Strategies'
 import Trades from './pages/Trades'
 import Gold from './pages/Gold'
-import News from './pages/News'
+import Analyst from './pages/Analyst'
+import Options from './pages/Options'
 
 export default function App() {
   return (
@@ -13,10 +13,10 @@ export default function App() {
       <Route element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="markets" element={<Markets />} />
-        <Route path="strategies" element={<Strategies />} />
         <Route path="trades" element={<Trades />} />
         <Route path="gold" element={<Gold />} />
-        <Route path="news" element={<News />} />
+        <Route path="analyst" element={<Analyst />} />
+        <Route path="options" element={<Options />} />
       </Route>
     </Routes>
   )
