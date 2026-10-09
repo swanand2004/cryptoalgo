@@ -26,6 +26,14 @@ class OrderRequest:
     # select a leverage tier. Defaults to full conviction so any caller that
     # doesn't have a real signal (e.g. a manual order) gets the ceiling.
     quality: float = 1.0
+    # Explicit exchange leverage for this order (live: set on Delta before it
+    # is placed). None -> the conviction tier, select_leverage(quality).
+    leverage: Optional[float] = None
+    # Small-account minimum lot (trading_loop._min_lot_target): ONE contract
+    # the normal sizing rounded to zero, already checked against the
+    # account-level leverage cap -- so the per-trade margin caps, which can
+    # never fit a whole contract on a tiny account, are not re-applied.
+    min_lot: bool = False
 
 
 @dataclass
@@ -60,13 +68,14 @@ class PositionView:
     # implies in USD terms, plus the margin that leverage choice locks up.
     notional_usd: float = 0.0  # abs(size) * contract_value * current price
     margin_usd: float = 0.0  # notional_usd / leverage
+    liquidation_price: Optional[float] = None  # Delta's, live only
 
 
 class Broker(ABC):
     mode: str
 
     @abstractmethod
-    async def place_order(self, req: OrderRequest) -> OrderResult: ...
+    async def place_order(self, req: OrderRequest, exit_reason: str = "signal") -> OrderResult: ...
 
     @abstractmethod
     async def cancel_order(self, order_id: int) -> None: ...

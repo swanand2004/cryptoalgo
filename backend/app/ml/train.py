@@ -110,6 +110,13 @@ class TrainingReport:
     model_path: str = ""
 
 
+def _long_only_baseline(y: pd.Series) -> float:
+    """Share of MOVED bars that closed up -- computed on the same basis as
+    directional accuracy so the two are directly comparable."""
+    moved = y[np.sign(y) != 0]
+    return float((moved > 0).mean()) if len(moved) else 0.5
+
+
 def _evaluate_fold(model: lgb.Booster, X_test: pd.DataFrame, y_test: pd.Series) -> tuple[float, float, float, float, float, np.ndarray]:
     preds = model.predict(X_test)
     y_true = y_test.values
@@ -201,6 +208,13 @@ def train_and_save(
         "horizon_bars": horizon_bars,
         "version": version,
         "feature_columns": FEATURE_COLUMNS,
+        # The bar a directional model actually has to clear. Crypto drifts up
+        # too -- measured on nine years of hourly Binance history, 51.3% of
+        # moved BTC bars and 51.0% of ETH bars close higher over 4 hours -- so
+        # comparing a model to 50% flatters it by more than a point. Recorded
+        # per-model rather than assumed, because it differs by symbol and
+        # horizon (SOL's is 49.95%, i.e. below a coin flip).
+        "long_only_baseline": _long_only_baseline(y),
         "pred_std": pred_std,
         "confidence_threshold_multiple": CONFIDENCE_THRESHOLD_MULTIPLE,
     }

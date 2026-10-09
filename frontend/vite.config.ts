@@ -5,7 +5,11 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    port: 5173,
+    port: 5180,
+    // Fail loudly if 5180 is taken rather than silently sliding to 5181 --
+    // a dashboard quietly moving ports is how you end up reading a stale tab
+    // and thinking the book stopped trading.
+    strictPort: true,
     // Without an explicit host, Node's `listen(port, 'localhost')` binds to
     // whichever address 'localhost' resolves to FIRST -- on this machine
     // that was only the IPv6 loopback ([::1]), so anything resolving

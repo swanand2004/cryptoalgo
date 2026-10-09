@@ -1,0 +1,64 @@
+{
+  "horizon": "short_term",
+  "resolution": "1h",
+  "horizon_bars": 24,
+  "trained_at": "2026-09-04T05:47:22.840866+00:00",
+  "n_samples": 52175,
+  "mean_directional_accuracy": 0.5073201953656683,
+  "mean_information_coefficient": -0.007861400132493224,
+  "mean_decidable_fraction": 0.1735480161012076,
+  "mean_decidable_directional_accuracy": 0.5053439439221139,
+  "long_only_baseline": 0.5233105512989699,
+  "flat_bar_fraction": 0.026909439386679446,
+  "n_features": 79,
+  "confidence_threshold_multiple": 0.95,
+  "prediction_std": 0.003323961252041283,
+  "model_path": "C:\\Users\\swana\\Desktop\\cryptoalgo\\backend\\app\\gold\\model_store\\gold_short_term_20260904054722.txt",
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "directional_accuracy": 0.49108550636749543,
+      "information_coefficient": -0.017007758961976056,
+      "rmse": 0.008257354738261027,
+      "n_test": 8695,
+      "decidable_fraction": 0.24634847613571018,
+      "decidable_directional_accuracy": 0.452081316553727
+    },
+    {
+      "fold": 1,
+      "directional_accuracy": 0.5121921630474342,
+      "information_coefficient": 0.02116818688320296,
+      "rmse": 0.007818111740601704,
+      "n_test": 8695,
+      "decidable_fraction": 0.08384128809660725,
+      "decidable_directional_accuracy": 0.4590395480225989
+    },
+    {
+      "fold": 2,
+      "directional_accuracy": 0.501016868046417,
+      "information_coefficient": 0.022848376592872366,
+      "rmse": 0.008122886681676067,
+      "n_test": 8695,
+      "decidable_fraction": 0.12075905692926969,
+      "decidable_directional_accuracy": 0.5773809523809523
+    },
+    {
+      "fold": 3,
+      "directional_accuracy": 0.5173501577287066,
+      "information_coefficient": -0.03936060497185624,
+      "rmse": 0.009050035393056958,
+      "n_test": 8695,
+      "decidable_fraction": 0.2147211040828062,
+      "decidable_directional_accuracy": 0.5305343511450382
+    },
+    {
+      "fold": 4,
+      "directional_accuracy": 0.5149562816382881,
+      "information_coefficient": -0.026955200204709144,
+      "rmse": 0.015217159899689749,
+      "n_test": 8695,
+      "decidable_fraction": 0.20207015526164462,
+      "decidable_directional_accuracy": 0.5076835515082527
+    }
+  ]
+}

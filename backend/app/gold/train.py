@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from app.gold.features import GOLD_FEATURE_COLUMNS_NO_MICRO  # noqa: F401
 from app.gold.features import GOLD_FEATURE_COLUMNS, GOLD_WARMUP_BARS
 from app.ml.dataset import make_forward_return_labels, purged_walk_forward_splits
 
@@ -62,8 +63,11 @@ GOLD_HORIZONS: dict[str, dict] = {
     # 5-fold purged walk-forward, so this now matches short_term/intraday
     # exactly rather than needing a special case for thin data.
     "long_term": {
+        # Micro columns excluded here and only here -- 1,981 daily rows cannot
+        # carry 79 features, and the ablation measured a 3.3-point LOSS from
+        # adding them (see GOLD_FEATURE_COLUMNS_NO_MICRO in features.py).
         "resolution": "1d", "limit": 3_000, "serving_limit": 500, "horizon_bars": 5,  # ~1 week ahead
-        "feature_columns": GOLD_FEATURE_COLUMNS, "warmup_bars": GOLD_WARMUP_BARS, "n_splits": 5,
+        "feature_columns": GOLD_FEATURE_COLUMNS_NO_MICRO, "warmup_bars": GOLD_WARMUP_BARS, "n_splits": 5,
     },
 }
 
@@ -133,17 +137,33 @@ def _evaluate_fold(
 ) -> tuple[float, float, float, float, float, np.ndarray]:
     preds = model.predict(X_test)
     y_true = y_test.values
-    directional_acc = float(np.mean(np.sign(preds) == np.sign(y_true)))
     ic, _ = spearmanr(preds, y_true)
     rmse = float(np.sqrt(np.mean((preds - y_true) ** 2)))
+
+    # FLAT bars are excluded from directional accuracy. PAXG prints a lot of
+    # them -- 10.7% of 15m bars have an exactly-zero 4-bar forward return, and
+    # 2.7% of hourly bars over 24 -- because it is a thinly traded token with
+    # stale quotes. np.sign(0) is 0, so a flat bar scores as WRONG for a
+    # prediction AND for its exact opposite simultaneously, which is not a
+    # measure of anything. Counting them subtracted a near-constant ~10 points
+    # from every intraday accuracy figure and made the model look like a coin
+    # flip when it was not. There is also no direction to get right on a bar
+    # that did not move, so they are not a loss being hidden -- they are
+    # untradeable either way.
+    moved = np.sign(y_true) != 0
+    n_moved = int(moved.sum())
+    directional_acc = (
+        float(np.mean(np.sign(preds[moved]) == np.sign(y_true[moved]))) if n_moved else 0.0
+    )
 
     fold_pred_std = np.std(preds)
     threshold = CONFIDENCE_THRESHOLD_MULTIPLE * fold_pred_std
     confident_mask = np.abs(preds) >= threshold
     decidable_fraction = float(np.mean(confident_mask))
+    decidable_and_moved = confident_mask & moved
     decidable_acc = (
-        float(np.mean(np.sign(preds[confident_mask]) == np.sign(y_true[confident_mask])))
-        if confident_mask.any()
+        float(np.mean(np.sign(preds[decidable_and_moved]) == np.sign(y_true[decidable_and_moved])))
+        if decidable_and_moved.any()
         else 0.0
     )
     return directional_acc, float(ic) if not np.isnan(ic) else 0.0, rmse, decidable_fraction, decidable_acc, preds
@@ -244,6 +264,13 @@ def train_and_save_gold(
         prediction_std=pred_std,
         model_path=str(model_path),
     )
+    # The bar that actually matters. Gold drifts up, so 50% is the wrong
+    # reference: a model only earns the right to pick sides if it beats simply
+    # being long. Computed on the same moved-bars basis as directional
+    # accuracy so the two are directly comparable.
+    moved_labels = y[np.sign(y) != 0]
+    long_only_baseline = float((moved_labels > 0).mean()) if len(moved_labels) else 0.5
+    flat_bar_fraction = float(1.0 - len(moved_labels) / len(y)) if len(y) else 0.0
     logger.info(
         "Trained gold %s model v%s: dir_acc=%.3f IC=%.3f (n=%d) | decidable(~%.0f%% of bars): dir_acc=%.3f",
         horizon, version, report.mean_directional_accuracy, report.mean_information_coefficient, len(X),
@@ -260,6 +287,9 @@ def train_and_save_gold(
         "mean_information_coefficient": report.mean_information_coefficient,
         "mean_decidable_fraction": report.mean_decidable_fraction,
         "mean_decidable_directional_accuracy": report.mean_decidable_directional_accuracy,
+        "long_only_baseline": long_only_baseline,
+        "flat_bar_fraction": flat_bar_fraction,
+        "n_features": len(feature_columns),
         "confidence_threshold_multiple": CONFIDENCE_THRESHOLD_MULTIPLE,
         "prediction_std": report.prediction_std,
         "model_path": report.model_path,

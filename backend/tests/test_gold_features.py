@@ -250,3 +250,34 @@ def test_deep_columns_included_in_the_long_term_reduced_feature_set_too():
     are valid, and included, for long_term too."""
     for col in DEEP_COLUMNS:
         assert col in GOLD_FEATURE_COLUMNS_LONG_TERM
+
+
+def test_microstructure_columns_survive_a_source_with_no_volume():
+    """build_gold_feature_frame's contract is that only time/OHLC are
+    required. The microstructure block broke that: with volume all zero its
+    four volume-dependent columns went entirely NaN, and because
+    build_gold_training_frame keeps only rows where EVERY feature is present,
+    one absent optional input silently emptied the whole training matrix --
+    0 usable rows out of 127,000. Zero is the right neutral here: no
+    observable flow imbalance and no measurable price impact is a reading,
+    not a missing value."""
+    candles = _synthetic_gold_candles(n=GOLD_WARMUP_BARS + 40)
+    candles["volume"] = 0.0
+    features = build_gold_feature_frame(candles)
+
+    micro = [c for c in GOLD_FEATURE_COLUMNS if c.startswith("micro_")]
+    assert micro, "expected microstructure columns in the feature bank"
+    warm = features.iloc[GOLD_WARMUP_BARS:]
+    for col in micro:
+        assert warm[col].notna().all(), f"{col} went NaN with no volume"
+
+
+def test_the_daily_horizon_does_not_get_the_microstructure_block():
+    """Measured, not stylistic: the ablation cost the 1,981-row daily model
+    3.3 points of directional accuracy when these 12 columns were added, which
+    is what handing 79 features to a sample that size does."""
+    from app.gold.train import GOLD_HORIZONS
+
+    assert not any(c.startswith("micro_") for c in GOLD_HORIZONS["long_term"]["feature_columns"])
+    for horizon in ("intraday", "short_term"):
+        assert any(c.startswith("micro_") for c in GOLD_HORIZONS[horizon]["feature_columns"])

@@ -17,6 +17,7 @@ from app.astro.panchang import (
     vara_lord_bias,
     yoga_severity,
 )
+from app.features.microstructure import ohlcv_microstructure
 from app.features.indicators import (
     adx,
     atr,
@@ -164,6 +165,34 @@ GOLD_FEATURE_COLUMNS: list[str] = [
     "deep_regime_confidence",
     "deep_astro_consensus",
     "deep_composite_score",
+    # Microstructure, from OHLCV. These are the estimators built for exactly
+    # this situation -- a market where you have bars and no order book: Roll's
+    # serial-covariance spread, the Corwin-Schultz high-low spread, Amihud
+    # illiquidity, a Kyle-lambda price-impact proxy. The earlier conclusion
+    # that "no order book means no microstructure" skipped the literature that
+    # exists precisely because order books are often unavailable.
+    #
+    # They are given to the MODEL as features rather than hand-weighted into
+    # a vote. Measured directly (backend/scripts/gold_micro_search.py, 3-way
+    # split), no hand-built combination of them beat simply being long gold at
+    # any horizon tested. That rules out a hand-weighted micro vote; it does
+    # not rule out the model finding conditional structure in them, which is
+    # what a gradient-boosted tree is for and what this wiring tests.
+    #
+    # They are also the first features here that USE VOLUME, which the rest of
+    # the bank ignores entirely.
+    "micro_cs_spread",
+    "micro_roll_spread",
+    "micro_amihud",
+    "micro_kyle_lambda",
+    "micro_signed_flow",
+    "micro_volume_shock",
+    "micro_close_location",
+    "micro_wick_asymmetry",
+    "micro_body_ratio",
+    "micro_ret_autocorr",
+    "micro_vol_of_vol",
+    "micro_jump_ratio",
 ]
 
 # Longest lookback actually used above (hurst_200) plus a safety margin, so
@@ -174,6 +203,22 @@ GOLD_FEATURE_COLUMNS: list[str] = [
 # that was needed back when the daily source had only ~127 real rows.
 GOLD_WARMUP_BARS = 210
 
+# The microstructure block, EXCLUDED for the daily horizon.
+#
+# Ablation (backend/scripts/gold_micro_ablation.py, identical folds, the only
+# difference being these 12 columns):
+#     intraday   (15m, n=127k)  55.78% -> 55.69%   -0.09  inside noise
+#     short_term (1h,  n= 52k)  50.23% -> 50.73%   +0.50  OUTSIDE noise, helps
+#     long_term  (1d,  n=1,981) 51.95% -> 48.64%   -3.31  OUTSIDE noise, hurts
+#
+# The daily model has 1,981 rows. Handing 79 features to a sample that size is
+# how a tree memorises noise, and the ablation measured exactly that. This is
+# not a fitted per-horizon weight -- it is one binary include/exclude decision
+# with a sample-size reason that was true before the measurement agreed.
+GOLD_FEATURE_COLUMNS_NO_MICRO: list[str] = [
+    c for c in GOLD_FEATURE_COLUMNS if not c.startswith("micro_")
+]
+
 # LEGACY / fallback only -- no longer used by GOLD_HORIZONS (train.py) as of
 # the 2026-08-25 switch to PAXG/USDT, which gives the long-term/1d model
 # ~2200 real daily rows, comfortably past the 200+ the 100/200-bar-lookback
@@ -183,7 +228,11 @@ GOLD_WARMUP_BARS = 210
 # or 100 -- and a correspondingly smaller warmup), in case the daily data
 # source ever regresses to something this thin again.
 GOLD_FEATURE_COLUMNS_LONG_TERM: list[str] = [
-    c for c in GOLD_FEATURE_COLUMNS
+    # Microstructure is excluded here for the same measured reason it is
+    # excluded from the daily horizon: this list exists for genuinely thin
+    # samples, and the ablation showed 12 extra columns cost the 1,981-row
+    # daily model 3.3 points. A thinner sample can only be worse.
+    c for c in GOLD_FEATURE_COLUMNS_NO_MICRO
     if c not in {"ma_z_100", "ma_z_200", "hurst_100", "hurst_200", "fib_position_100"}
 ]
 GOLD_WARMUP_BARS_LONG_TERM = 65
@@ -425,6 +474,7 @@ def build_gold_feature_frame(candles: pd.DataFrame) -> pd.DataFrame:
         out["macro_nearest_is_nfp"],
     ) = macro_event_proximity(times_utc)
 
+    out = ohlcv_microstructure(out)
     out = _deep_analysis_layers(out)
 
     return out

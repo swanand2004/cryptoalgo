@@ -18,7 +18,14 @@ logger = logging.getLogger(__name__)
 # get_volatility_index_data?currency=SOL returns an empty series, not an
 # error), so there is no DVOL feature to compute for it. That's a real
 # coverage gap, not a bug to work around.
-BINANCE_SYMBOL = {"BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT"}
+# BNBUSD joined the live universe on 2026-09-07 but was never added here, so
+# every funding/OI/long-short refresh for it raised KeyError each cycle.
+# The size-aware filler coins (ADA/HBAR/MANA/STX/TRX/XLM, 2026-10-05) hit the
+# same KeyError -- 18 tracebacks an hour. Unmapped symbols now get an empty
+# series instead. They are deliberately NOT added here: these series feed the
+# Analyst's factor scores, so adding them would change its calls on those
+# coins, which is a trading decision, not a bug fix.
+BINANCE_SYMBOL = {"BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT", "BNBUSD": "BNBUSDT"}
 DERIBIT_CURRENCY = {"BTCUSD": "BTC", "ETHUSD": "ETH"}
 
 FNG_SYMBOL = "FNG:GLOBAL"
@@ -108,7 +115,9 @@ async def fetch_binance_funding_history(delta_symbol: str, limit: int = 1000) ->
     divergence between venues signals relative positioning imbalance, a
     genuinely documented (if noisy) crowding/arbitrage signal.
     """
-    binance_symbol = BINANCE_SYMBOL[delta_symbol]
+    binance_symbol = BINANCE_SYMBOL.get(delta_symbol)
+    if binance_symbol is None:
+        return []  # unmapped symbol: no series, not a KeyError every hour (see BINANCE_SYMBOL)
     exchange = ccxt_async.binanceusdm()
     try:
         raw = await exchange.fetch_funding_rate_history(binance_symbol, limit=min(limit, 1000))
@@ -129,7 +138,9 @@ async def fetch_binance_open_interest_hist(delta_symbol: str, period: str = "1h"
     rising OI alongside falling price = fresh shorts piling in -- the
     standard institutional read on OI-vs-price divergence.
     """
-    binance_symbol = BINANCE_SYMBOL[delta_symbol]
+    binance_symbol = BINANCE_SYMBOL.get(delta_symbol)
+    if binance_symbol is None:
+        return []  # unmapped symbol: no series, not a KeyError every hour (see BINANCE_SYMBOL)
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.get(
             "https://fapi.binance.com/futures/data/openInterestHist",
@@ -151,7 +162,9 @@ async def fetch_binance_long_short_ratio(delta_symbol: str, period: str = "1h", 
     trade" fragility signal that motivates funding-rate-based risk reads --
     a second, independent read on the same underlying phenomenon.
     """
-    binance_symbol = BINANCE_SYMBOL[delta_symbol]
+    binance_symbol = BINANCE_SYMBOL.get(delta_symbol)
+    if binance_symbol is None:
+        return []  # unmapped symbol: no series, not a KeyError every hour (see BINANCE_SYMBOL)
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.get(
             "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",

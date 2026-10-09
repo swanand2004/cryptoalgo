@@ -71,8 +71,95 @@ export interface Position {
   fees_paid: number
   stop_loss_price: number | null
   take_profit_price: number | null
+  signal?: number | null
+  exit_threshold?: number | null
   notional_usd: number
   margin_usd: number
+  // Prices at which the account limits would close this trade (no exchange stop).
+  liquidation_price?: number | null
+  loss_exit_price?: number | null
+  profit_exit_price?: number | null
+  drawdown_exit_price?: number | null
+}
+
+// ---- Gold Signal Board (technicals + Gann, direction-neutral) ----
+export interface TrackRecord {
+  hit: number | null
+  base: number | null
+  n: number
+}
+export interface BoardIndicator extends TrackRecord {
+  key: string
+  name: string
+  family: 'Trend' | 'Oscillator' | 'Gann'
+  detail: string
+  vote: number
+  since: string
+  price_at_since: number
+  bars_since: number
+}
+export interface GannLevels {
+  swing: {
+    last_top: { price: number; time: string; bars_ago: number } | null
+    last_bottom: { price: number; time: string; bars_ago: number } | null
+  }
+  angles: { name: string; price: number; price_is: 'above' | 'below' }[]
+  square_of_nine: { price: number; angle: number; kind: 'support' | 'resistance' }[]
+  time_cycles: { due: string; bars: number; from: 'top' | 'bottom'; pivot_time: string; pivot_price: number }[]
+}
+export interface GoldTrade {
+  side: 'BUY' | 'SELL'
+  entry_time: string
+  entry: number
+  stop_loss: number
+  take_profit: number
+  risk_reward: number
+  status: 'ACTIVE' | 'TP HIT' | 'STOPPED OUT'
+  exit_time: string | null
+  exit_price: number | null
+  closed_time: string | null
+  result: 'TP' | 'SL' | null
+  open: boolean
+  pnl_pct: number
+  r_multiple: number
+  bars_held: number
+}
+export interface SignalBoard {
+  timeframe: 'daily' | 'hourly'
+  horizon_bars: number
+  bar_close_time: string
+  price: number
+  consensus: TrackRecord & {
+    direction: 'BUY' | 'SELL' | 'NEUTRAL'
+    score: number
+    buy: number
+    sell: number
+    neutral: number
+    since: string
+    price_at_signal: number
+    change_since_pct: number
+    bars_since: number
+  }
+  indicators: BoardIndicator[]
+  gann: GannLevels
+  change_24h_pct: number | null
+  trade: GoldTrade | null
+  // Signal active but no open trade: the levels of a trade entered now.
+  plan: { side: 'BUY' | 'SELL'; entry: number; stop_loss: number; take_profit: number } | null
+  last_trade: GoldTrade | null
+  history: GoldTrade[]
+  history_stats: {
+    trades: number
+    since?: string
+    tp?: number
+    sl?: number
+    win_rate?: number
+    net_pct?: number
+    avg_pct?: number
+  }
+  triggers: { buy_above: number; sell_below: number } | null
+  levels: { price: number; label: string; source: 'pivot' | 'gann' | 'swing' | 'range'; kind: 'support' | 'resistance' }[]
+  families: { family: string; label: string; score: number; buy: number; sell: number; neutral: number }[]
 }
 
 export interface OrderRow {
@@ -158,6 +245,38 @@ export interface GoldLevels {
   distance_to_breakdown_pct: number | null
 }
 
+export interface GoldTradePlan {
+  action: 'BUY' | 'SELL' | 'HOLD'
+  viable: boolean
+  current_price: number | null
+  entry: number | null
+  entry_type?: 'market' | 'limit'
+  limit_entry?: number | null
+  entry_distance_pct?: number | null
+  entry_distance_atr?: number | null
+  entry_reachable?: boolean
+  stop_loss: number | null
+  take_profit: number | null
+  risk_per_unit?: number | null
+  reward_per_unit?: number | null
+  risk_reward: number | null
+  risk_reward_at_market?: number | null
+  target_rr?: number
+  min_viable_rr?: number
+  target_remaining_usd?: number | null
+  target_remaining_pct?: number | null
+  stop_distance_pct?: number | null
+  stop_atr_multiple?: number | null
+  atr?: number | null
+  structural_target?: number | null
+  structural_risk_reward?: number | null
+  size_multiplier?: number | null
+  model_conflict?: boolean
+  trigger_long_above?: number | null
+  trigger_short_below?: number | null
+  note: string
+}
+
 export interface GoldMacroFactor {
   name: string
   raw_value: number | null
@@ -169,9 +288,22 @@ export interface GoldMacroFactor {
   contributes: boolean
 }
 
+export interface GoldMicroFactor {
+  name: string
+  kind: 'directional' | 'regime'
+  value: number | null
+  score: number
+  conviction: number
+  direction: string
+  detail: string
+}
+
 export interface GoldBlend {
   model_score: number
   factor_score: number
+  directional_score: number
+  micro_conviction: number
+  micro_factors: GoldMicroFactor[]
   blended_score: number
   model_weight: number
   factor_weight: number
@@ -184,6 +316,7 @@ export interface GoldBlend {
 
 export interface GoldPrediction {
   levels?: GoldLevels
+  trade?: GoldTradePlan | null
   blend?: GoldBlend | null
   score: number | null
   decidable: boolean
@@ -196,6 +329,7 @@ export interface GoldPrediction {
   n_samples: number | null
   mean_directional_accuracy: number | null
   mean_information_coefficient: number | null
+  long_only_baseline: number | null
   risk_level: 'low' | 'medium' | 'high' | 'very_high'
   risk_reason: string
 }
@@ -252,6 +386,48 @@ export interface GoldSnapshot {
   cross_asset?: GoldCrossAsset
 }
 
+export interface CryptoFactor {
+  name: string
+  bucket: 'micro' | 'macro' | 'sentiment' | 'funding' | 'events' | 'astrology' | 'news'
+  value: number | null
+  z_score: number | null
+  score: number
+  direction: 'bullish' | 'bearish' | 'neutral'
+  /** Did this factor survive measurement? Only these carry weight. */
+  contributes: boolean
+  detail: string
+}
+
+export interface CryptoPrediction {
+  symbol: string
+  ready: boolean
+  reason?: string
+  as_of: string
+  price: number | null
+  horizon_hours: number
+  action: 'BUY' | 'SELL' | 'HOLD'
+  model_score: number
+  factor_score: number
+  blended_score: number
+  model_weight: number
+  factor_weight: number
+  deadband: number
+  sides_agree: boolean
+  model_ready?: boolean
+  factors_total: number
+  factors_contributing: number
+  buckets: string[]
+  factors: CryptoFactor[]
+}
+
+export interface CryptoPredictionsResponse {
+  as_of: string
+  model_weight: number
+  default_model_weight: number
+  resolution: string
+  predictions: CryptoPrediction[]
+}
+
 export interface NewsHeadline {
   title: string
   source: string
@@ -305,10 +481,146 @@ export const api = {
     req<StrategyConfigRow>(`/strategies/${name}`, { method: 'PUT', body: JSON.stringify(body) }),
 
   goldSnapshot: () => req<GoldSnapshot>('/gold/snapshot'),
+  goldSignalBoard: () => req<{ daily: SignalBoard | null; hourly: SignalBoard | null }>('/gold/signal_board'),
   goldCandles: (resolution = '1h', limit = 300) =>
     req<Candle[]>(`/gold/candles?resolution=${resolution}&limit=${limit}`),
+
+  cryptoPredictions: () => req<CryptoPredictionsResponse>('/predictions/crypto'),
+  analyst: () => req<AnalystSnapshot>('/analyst'),
+  analystGold: () => req<AnalystGoldSnapshot>('/analyst/gold'),
+  mlBookFilter: (days = 14) => req<BookFilterResponse>(`/ml/book-filter?days=${days}`),
 
   newsHeadlines: (limit = 40) => req<NewsHeadlinesResponse>(`/news/headlines?limit=${limit}`),
   newsSentimentHistory: (symbol = 'GLOBAL', hours = 72) =>
     req<NewsSentimentPoint[]>(`/news/sentiment_history?symbol=${symbol}&hours=${hours}`),
+}
+
+// ---- Analyst (free rules-based agent; paper trades only) ----
+export interface AnalystFactor {
+  key: string
+  family: 'technical' | 'structure' | 'derivatives' | 'sentiment' | 'macro' | 'live'
+  name: string
+  score: number
+  reading: string
+}
+export interface AnalystAnalysis {
+  symbol: string
+  time: string
+  price: number
+  decision: 'BUY' | 'SELL' | 'WAIT'
+  score: number
+  conviction: number
+  size_factor: number
+  families: Partial<Record<AnalystFactor['family'], number>>
+  factors: AnalystFactor[]
+  notes: string[]
+  entry: number | null
+  stop_loss: number | null
+  take_profit: number | null
+  atr?: number | null
+  supports?: number[]
+  resistances?: number[]
+  plan_note?: string
+  /** Live-bar mode: the call that is forming and how long it has held. */
+  live_bar?: { call: 'BUY' | 'SELL'; held_s: number; needed_s: number }
+}
+export interface AnalystTrade {
+  id: number
+  symbol: string
+  side: 'BUY' | 'SELL'
+  conviction: number
+  entry_time: string
+  entry: number
+  stop_loss: number
+  take_profit: number
+  open: boolean
+  exit_time: string | null
+  exit_price: number | null
+  result: 'TP' | 'SL' | 'TRAIL' | 'FLIP' | 'SYNC' | null
+  r_multiple: number | null
+  pnl_pct: number
+  live?: boolean
+  contracts?: number
+  extended?: boolean
+}
+export interface AnalystSnapshot {
+  updated: string | null
+  best: string | null
+  analyses: AnalystAnalysis[]
+  open_trades: AnalystTrade[]
+  closed_trades: AnalystTrade[]
+  stats: { closed: number; wins: number; win_rate: number | null; avg_r: number | null; total_r: number }
+  /** Latest run's gate per coin ("wait", "score<0.2", "book_disagrees", "OPENED", ...). */
+  gates?: Record<string, string>
+  /** The trend book's live signal per coin (-1..+1; |s| >= 0.15 = holding). */
+  book_signals?: Record<string, number | null>
+  risk_settings?: AnalystRiskSettings
+  /** Shadow variants (paper only) vs the live record over the same span; never in `stats`. */
+  variants?: AnalystVariantRace
+}
+export interface AnalystVariantRow {
+  key: string
+  label: string
+  closed: number
+  open: number
+  wins: number
+  win_rate: number | null
+  avg_r: number | null
+  total_r: number
+}
+export interface AnalystVariantRace {
+  enabled: boolean
+  since: string | null
+  rows: AnalystVariantRow[]
+}
+export interface AnalystRiskSettings {
+  trading_engine?: string
+  executes?: boolean
+  risk_pct?: number
+  risk_cap?: number
+  target_leverage?: number
+  min_liq_to_stop?: number
+  max_leverage?: number
+  maker_execution?: string
+  trail_mode?: string | null
+  trail_atr?: number
+  trail_atr_tight?: number
+  min_score?: number
+  min_conviction?: number
+  live_bar?: boolean
+}
+
+// ---- ML book filter v1 (daily size multiplier on the trend book; "shadow" = logged only) ----
+export interface BookFilterCoin {
+  p: number | null
+  m: number
+  S: number | null
+}
+export interface BookFilterRecord {
+  model?: string
+  decision_ts: number
+  decision_time?: string
+  applies_from_ts?: number
+  applies_until_ts?: number
+  lo?: number
+  hi?: number
+  stale?: boolean
+  reasons?: string[]
+  coins: Record<string, BookFilterCoin>
+  mode?: string
+  computed_at?: string
+}
+export interface BookFilterResponse {
+  mode: string
+  latest: BookFilterRecord | null
+  in_force: Record<string, number>
+  history: BookFilterRecord[]
+  note: string
+}
+export interface AnalystGoldSnapshot {
+  updated: string | null
+  analysis: AnalystAnalysis | null
+  open_trades: AnalystTrade[]
+  closed_trades: AnalystTrade[]
+  stats: AnalystSnapshot['stats']
 }

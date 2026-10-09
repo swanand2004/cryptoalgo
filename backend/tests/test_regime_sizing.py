@@ -150,16 +150,23 @@ def test_signal_thresholds_come_from_config_not_hardcoded_defaults(monkeypatch):
     from app.config import Settings, get_settings
     import app.strategy.registry as registry
 
-    custom = Settings(signal_deadband=0.07, signal_smoothing_span=5)
-    monkeypatch.setattr(registry, "get_settings", lambda: custom)
-
     async def _fake_configs():
         return {}
 
     monkeypatch.setattr(registry, "load_strategy_configs", _fake_configs)
+
+    # Explicit exit line: whatever config says, wins.
+    custom = Settings(signal_deadband=0.07, signal_smoothing_span=5, signal_exit_deadband=0.02)
+    monkeypatch.setattr(registry, "get_settings", lambda: custom)
     ens = asyncio.run(registry.build_ensemble_for_symbol("BTCUSD"))
     assert ens.deadband == 0.07
     assert ens.smoothing_span == 5
-    # exit line stays looser than entry, derived when not set explicitly
+    assert ens.exit_deadband == pytest.approx(0.02)
+
+    # Unset exit line: still derived as a looser multiple of entry, so a
+    # position isn't flattened by noise too small to have opened it.
+    derived = Settings(signal_deadband=0.07, signal_smoothing_span=5, signal_exit_deadband=None)
+    monkeypatch.setattr(registry, "get_settings", lambda: derived)
+    ens = asyncio.run(registry.build_ensemble_for_symbol("BTCUSD"))
     assert ens.exit_deadband == pytest.approx(0.07 * 0.4)
     get_settings.cache_clear()

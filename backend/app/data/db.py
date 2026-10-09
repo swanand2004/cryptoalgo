@@ -29,7 +29,31 @@ def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)
     await _seed_app_state()
+
+
+# create_all makes new TABLES but never new COLUMNS on an existing one. Columns
+# added to a model after its table exists are listed here and added in place.
+_ADDED_COLUMNS = {
+    "analyst_trades": {
+        "live": "BOOLEAN DEFAULT 0", "contracts": "INTEGER DEFAULT 0", "initial_stop": "FLOAT",
+        "atr": "FLOAT", "peak": "FLOAT", "extended": "BOOLEAN DEFAULT 0",
+        "variant": "VARCHAR(8)",  # NULL = live record; else a shadow variant (paper only)
+    },
+}
+
+
+def _add_missing_columns(conn) -> None:
+    from sqlalchemy import text
+
+    for table, cols in _ADDED_COLUMNS.items():
+        have = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+        if not have:
+            continue
+        for name, ddl in cols.items():
+            if name not in have:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
 
 
 async def _seed_app_state() -> None:
@@ -38,8 +62,11 @@ async def _seed_app_state() -> None:
     async with SessionLocal() as session:
         result = await session.execute(select(AppState).where(AppState.key == "trading_mode"))
         if result.scalar_one_or_none() is None:
-            # Always boot in paper mode -- live mode must be enabled explicitly each session.
-            session.add(AppState(key="trading_mode", value="paper"))
+            # First run only: Settings.default_trading_mode. Afterwards the
+            # stored mode is kept across restarts.
+            from app.config import get_settings
+
+            session.add(AppState(key="trading_mode", value=get_settings().default_trading_mode.value))
             session.add(AppState(key="kill_switch", value="off"))
             await session.commit()
 

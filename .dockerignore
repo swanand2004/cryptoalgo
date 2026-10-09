@@ -1,0 +1,20 @@
+# Build context for deploy/Dockerfile (context is the repo root).
+# Secrets and data must never be baked into an image layer -- anyone who can
+# pull the image can read every layer, deleted files included.
+**/.env
+**/*.env
+**/.env.bak*
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite3
+**/*.log
+
+# Rebuilt inside the image; copying them only bloats the context.
+**/.venv
+**/venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+frontend/dist
+.git

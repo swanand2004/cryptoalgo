@@ -45,6 +45,13 @@ _WEIGHT_25 = {
 }
 
 
+def _is_expired_signature(response) -> bool:
+    try:
+        return (response.json().get("error") or {}).get("code") == "expired_signature"
+    except (ValueError, AttributeError):
+        return False
+
+
 def _endpoint_weight(method: str, path: str) -> int:
     # Match by prefix so path params (e.g. /v2/orders/{id}) still resolve.
     for table, weight in ((_WEIGHT_25, 25), (_WEIGHT_10, 10), (_WEIGHT_5, 5), (_WEIGHT_3, 3)):
@@ -72,7 +79,11 @@ class DeltaRestClient:
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or get_settings()
-        self._client = httpx.AsyncClient(base_url=self.settings.rest_url, timeout=httpx.Timeout(3.0, read=27.0))
+        local_address = {"ipv6": "::", "ipv4": "0.0.0.0"}.get(self.settings.delta_ip_family)
+        transport = httpx.AsyncHTTPTransport(local_address=local_address) if local_address else None
+        self._client = httpx.AsyncClient(
+            base_url=self.settings.rest_url, timeout=httpx.Timeout(3.0, read=27.0), transport=transport
+        )
         self._rate_limiter = WeightedRateLimiter()
 
     async def aclose(self) -> None:
@@ -116,25 +127,47 @@ class DeltaRestClient:
         if body:
             headers["Content-Type"] = "application/json"
 
-        if auth:
-            if not self.settings.has_credentials:
-                raise RuntimeError(
-                    f"Authenticated request to {path} requires DELTA_API_KEY/DELTA_API_SECRET "
-                    "in backend/.env"
-                )
-            timestamp = str(int(time.time()))
-            signature = self._sign(method, timestamp, path, query_string, body)
-            headers.update(
-                {
-                    "api-key": self.settings.delta_api_key,
-                    "signature": signature,
-                    "timestamp": timestamp,
-                }
+        if auth and not self.settings.has_credentials:
+            raise RuntimeError(
+                f"Authenticated request to {path} requires DELTA_API_KEY/DELTA_API_SECRET "
+                "in backend/.env"
             )
 
         url = path + query_string
         for attempt in range(max_retries):
-            response = await self._client.request(method, url, content=body or None, headers=headers)
+            if auth:
+                # Signed per ATTEMPT, right before sending. Delta rejects a
+                # signature a few seconds old ("expired_signature"), and both a
+                # rate-limit back-off and a slow network path can age one that
+                # was made earlier -- the VPS measured ~10-15 s request times.
+                timestamp = str(int(time.time()))
+                headers.update(
+                    {
+                        "api-key": self.settings.delta_api_key,
+                        "signature": self._sign(method, timestamp, path, query_string, body),
+                        "timestamp": timestamp,
+                    }
+                )
+            try:
+                response = await self._client.request(method, url, content=body or None, headers=headers)
+            except (httpx.ConnectTimeout, httpx.ConnectError):
+                # The connection was never established, so nothing reached
+                # Delta. Retried for GETs only (reads are idempotent); order
+                # POST/DELETEs keep failing fast exactly as before. On the VPS
+                # the 3 s IPv6 connect timed out hundreds of times a day
+                # (2026-10-06 journal: ~550 balance fallbacks in 10 h), each one
+                # surfacing as a stale-balance fallback, a skipped position
+                # sync, a dead deadman loop or (once) a failed startup.
+                if method != "GET" or attempt >= max_retries - 1:
+                    raise
+                logger.info("Delta connect failed on %s %s; retrying (attempt %d)", method, path, attempt + 2)
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            if response.status_code == 401 and auth and attempt < max_retries - 1 and _is_expired_signature(response):
+                # Rejected before Delta acted on it, so a fresh signature is
+                # safe to resend -- even for an order.
+                logger.warning("Delta signature expired in transit on %s %s; re-signing and retrying", method, path)
+                continue
             if response.status_code == 429:
                 reset_ms = int(response.headers.get("X-RATE-LIMIT-RESET", "1000"))
                 logger.warning("Rate limited on %s %s, backing off %sms", method, path, reset_ms)

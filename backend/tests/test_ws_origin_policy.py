@@ -63,3 +63,14 @@ def test_missing_origin_is_allowed():
 def test_the_static_allowlist_still_passes():
     for origin in ALLOWED_ORIGINS:
         assert is_allowed_origin(origin)
+
+
+def test_same_origin_public_host_is_allowed():
+    # The deployed dashboard is served by the backend itself, so its Origin
+    # host equals the request Host -- whatever the tunnel URL happens to be.
+    assert is_allowed_origin("https://dash.example.com", host="dash.example.com")
+
+
+def test_public_origin_for_a_different_host_is_still_refused():
+    assert not is_allowed_origin("https://evil.example.net", host="dash.example.com")
+    assert not is_allowed_origin("https://dash.example.com.evil.net", host="dash.example.com")

@@ -7,10 +7,10 @@ import { useDashboardSocket } from '../lib/ws'
 const NAV = [
   { to: '/', label: 'Dashboard' },
   { to: '/markets', label: 'Markets' },
-  { to: '/strategies', label: 'Strategies' },
   { to: '/trades', label: 'Trades' },
   { to: '/gold', label: 'Gold' },
-  { to: '/news', label: 'News' },
+  { to: '/analyst', label: 'Analyst' },
+  { to: '/options', label: 'Options' },
 ]
 
 // Locking in a hit profit target is good news, so it gets its own (emerald,
@@ -54,19 +54,21 @@ export function Header() {
 
   return (
     <header className="border-b border-neutral-800 bg-neutral-950/80 backdrop-blur sticky top-0 z-10">
-      <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-6">
+      {/* Phones: logo + controls on the first row, the nav on its own row that
+          scrolls sideways by itself (never the page). md+: one row. */}
+      <div className="max-w-7xl mx-auto px-4 py-2 md:py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
         <div className="font-semibold text-lg tracking-tight text-neutral-100">
           crypto<span className="text-emerald-400">algo</span>
         </div>
 
-        <nav className="flex gap-1">
+        <nav className="order-last md:order-none w-full md:w-auto flex gap-1 overflow-x-auto -mx-1 px-1 md:mx-0 md:px-0">
           {NAV.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.to === '/'}
               className={({ isActive }) =>
-                `px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                `shrink-0 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
                   isActive ? 'bg-neutral-800 text-neutral-50' : 'text-neutral-400 hover:text-neutral-200'
                 }`
               }
@@ -76,12 +78,14 @@ export function Header() {
           ))}
         </nav>
 
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-2 md:gap-3">
           {snapshot && (
-            <span className="text-xs text-neutral-500">
+            <span className="hidden sm:inline text-xs text-neutral-500">
               equity{' '}
               <span className="text-neutral-200 font-mono">
-                ${snapshot.equity.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                {snapshot.equity == null
+                  ? '--'
+                  : `$${snapshot.equity.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
               </span>
             </span>
           )}
@@ -89,13 +93,13 @@ export function Header() {
 
           <div className="flex rounded-md border border-neutral-700 overflow-hidden text-sm">
             <button
-              className={`px-3 py-1.5 font-medium ${mode === 'paper' ? 'bg-emerald-600 text-white' : 'bg-neutral-900 text-neutral-400 hover:text-neutral-200'}`}
+              className={`px-2 md:px-3 py-1 md:py-1.5 font-medium ${mode === 'paper' ? 'bg-emerald-600 text-white' : 'bg-neutral-900 text-neutral-400 hover:text-neutral-200'}`}
               onClick={() => setModeMutation.mutate('paper')}
             >
               Paper
             </button>
             <button
-              className={`px-3 py-1.5 font-medium ${mode === 'live' ? 'bg-red-600 text-white' : 'bg-neutral-900 text-neutral-400 hover:text-neutral-200'}`}
+              className={`px-2 md:px-3 py-1 md:py-1.5 font-medium ${mode === 'live' ? 'bg-red-600 text-white' : 'bg-neutral-900 text-neutral-400 hover:text-neutral-200'}`}
               onClick={() => {
                 if (window.confirm('Switch to LIVE trading? Real orders with real funds will be placed.')) {
                   setModeMutation.mutate('live')
@@ -107,7 +111,7 @@ export function Header() {
           </div>
 
           <button
-            className={`px-3 py-1.5 rounded-md text-sm font-semibold border ${
+            className={`px-2 md:px-3 py-1 md:py-1.5 rounded-md text-xs md:text-sm font-semibold border ${
               killSwitchOn
                 ? 'bg-red-600 border-red-500 text-white'
                 : 'border-neutral-700 text-neutral-400 hover:text-red-400 hover:border-red-500'

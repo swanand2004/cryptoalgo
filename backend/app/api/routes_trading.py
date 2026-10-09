@@ -17,6 +17,7 @@ from app.data.app_state import (
     set_trading_mode,
 )
 from app.data.query import load_closed_trades, load_equity_curve, load_fills, load_orders
+from app.risk.exit_levels import position_exit_levels
 from app.risk.position_sizing import required_margin
 from app.runtime import Runtime
 
@@ -79,9 +80,15 @@ async def set_mode(body: ModeUpdate, runtime: Runtime = Depends(get_runtime)):
             status_code=400,
             detail="Cannot enable live trading: DELTA_API_KEY/DELTA_API_SECRET are not configured in backend/.env",
         )
-    if await is_kill_switch_on() and body.mode == "live":
-        raise HTTPException(status_code=400, detail="Kill switch is active -- reset it before enabling live trading")
+    # Choosing live while the kill switch is on is allowed: limits now HALT in
+    # place instead of flipping to paper, and the kill switch alone keeps
+    # anything from trading until it is turned off.
+    previous = await get_trading_mode()
     await set_trading_mode(body.mode)
+    if body.mode != previous:
+        # Risk state is shared between modes; measure from the new account.
+        equity = await runtime.order_manager.get_equity()
+        await runtime.risk_manager.rebase_for_mode_switch(equity)
     return {"mode": body.mode}
 
 
@@ -105,16 +112,15 @@ async def update_kill_switch(body: KillSwitchUpdate, runtime: Runtime = Depends(
             equity = await runtime.order_manager.get_equity()
             await set_state("drawdown_halt_active", "off")
             await set_state("equity_high_water_mark", str(equity))
+            # stamped, so a later deposit/withdrawal knows the peak predates it
+            await set_state("equity_high_water_mark_at", dt.datetime.now(dt.timezone.utc).isoformat())
             logger.info("Max-drawdown halt acknowledged -- high-water mark re-based to %.2f", equity)
     if body.on:
-        # Flatten whichever broker was ACTUALLY live when the switch was
-        # hit, before flipping the mode to paper -- flatten_all() with no
-        # override reads the *current* mode, so switching to paper first
-        # would make it flatten paper positions while real live positions
-        # stay open and unmanaged.
+        # Flatten the account that is actually trading, then HALT in place --
+        # the mode is no longer flipped to paper (the kill switch alone stops
+        # new trades, and the dashboard keeps showing the real account).
         mode_to_flatten = await get_trading_mode()
-        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten)
-        await set_trading_mode("paper")
+        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten, reason="kill_switch")
     return {"on": body.on}
 
 
@@ -129,6 +135,13 @@ async def close_position(symbol: str, strategy: str, runtime: Runtime = Depends(
 @router.get("/positions")
 async def get_positions(runtime: Runtime = Depends(get_runtime)):
     positions = await runtime.order_manager.get_positions()
+    # Where each trade will actually be closed: there is no exchange stop, so
+    # the levels are the account limits converted into this position's price.
+    try:
+        equity = await runtime.order_manager.get_equity()
+    except Exception:
+        equity = None  # live balance unknown right now -- show no levels rather than wrong ones
+    levels = {key: await position_exit_levels(runtime, p, equity) for key, p in positions.items()}
     return [
         {
             "symbol": p.symbol,
@@ -142,10 +155,14 @@ async def get_positions(runtime: Runtime = Depends(get_runtime)):
             "fees_paid": p.fees_paid,
             "stop_loss_price": p.stop_loss_price,
             "take_profit_price": p.take_profit_price,
+            "signal": runtime.live_signals.get(p.symbol),
+            "exit_threshold": runtime.settings.signal_exit_deadband,
             "notional_usd": p.notional_usd,
             "margin_usd": p.margin_usd,
+            "liquidation_price": p.liquidation_price,
+            **levels[key],
         }
-        for p in positions.values()
+        for key, p in positions.items()
     ]
 
 

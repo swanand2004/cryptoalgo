@@ -1,0 +1,14 @@
+
+# Daily consistent DB snapshot; keep 7. Installed to /etc/cron.d/cryptoalgo-backup
+#
+# 2026-10-07 (maint): VACUUM INTO instead of .backup. Both are safe while the
+# bot writes (a read transaction under WAL; writers are never blocked), but
+# .backup copies the free pages too, so every backup was the full 600+ MB file;
+# VACUUM INTO writes a compacted copy. Needs sqlite >= 3.27 (server: 3.45.1).
+# Writes to a .tmp name first, so a failed run never leaves a half file that
+# looks like a good backup.
+15 2 * * * cryptoalgo f=/opt/cryptoalgo/backups/live-$(date +\%F).db; rm -f "$f.tmp" && sqlite3 /opt/cryptoalgo/data/live.db ".timeout 20000" "VACUUM INTO '$f.tmp'" && mv "$f.tmp" "$f" && find /opt/cryptoalgo/backups -name 'live-*.db' -mtime +7 -delete
+#
+# Deploy code backups (deploy_vps.sh writes backups/code_YYYYMMDD_HHMM.tgz, ~30 MB
+# each, on every deploy): keep the newest 5. Names sort by time.
+30 2 * * * root ls -1 /opt/cryptoalgo/backups/code_*.tgz 2>/dev/null | sort -r | tail -n +6 | xargs -r rm -f

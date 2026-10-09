@@ -7,6 +7,7 @@ import time
 import httpx
 
 from app.data.ingest_rest import upsert_candles
+from app.data.query import load_candles_df
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,22 @@ logger = logging.getLogger(__name__)
 # what live trading executes against and must not be silently blended with
 # another venue's prints. BINANCE:BTCUSD is for BACKTESTING and ML TRAINING
 # only; the live path never reads it.
-BINANCE_SPOT_SYMBOL = {"BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT"}
+BINANCE_SPOT_SYMBOL = {
+    "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT",
+    # Added 2026-09-07. A 30-asset universe study found no width that
+    # generalises -- train, validation and test disagreed about the optimum,
+    # and the rule that picked 29 symbols scored 0.54 on test against 0.86 for
+    # six. BNB is the single addition that improved ALL THREE windows
+    # (TRAIN 1.30 -> 1.50, VALIDATION 1.09 -> 1.16, TEST 0.67 -> 0.70), so it
+    # is the only one taken. Everything wider is noise, and the weak names
+    # measurably drag: LTC gross Sharpe -0.01, BCH 0.24, TRX 0.40.
+    "BNBUSD": "BNBUSDT",
+    # Small-account fillers (Settings.core_symbols, 2026-10-04): NOT part of
+    # the core book -- they trade only while the balance cannot hold every
+    # core symbol, chosen by contract size alone ($0.10-0.39 a contract).
+    "HBARUSD": "HBARUSDT", "MANAUSD": "MANAUSDT", "XLMUSD": "XLMUSDT",
+    "ADAUSD": "ADAUSDT", "TRXUSD": "TRXUSDT", "STXUSD": "STXUSDT",
+}
 HISTORY_PREFIX = "BINANCE:"
 FUNDING_PREFIX = "BFUNDHIST:"
 
@@ -153,7 +169,9 @@ async def backfill_deep_history(
 # Stored as BFUNDHIST:{symbol} to sit alongside BINANCE:{symbol} prices and
 # stay clear of both Delta's live series and the shallow BFUND: series the
 # hourly scheduler maintains.
-_FUNDING_PERP = {"BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT"}
+_FUNDING_PERP = {
+    "BTCUSD": "BTCUSDT", "ETHUSD": "ETHUSDT", "SOLUSD": "SOLUSDT", "BNBUSD": "BNBUSDT",
+}
 _FUNDING_START_MS = 1_567_000_000_000  # ~2019-08-28, before BTCUSDT perp listed
 
 
@@ -204,7 +222,20 @@ async def fetch_binance_funding_history_deep(
     return out
 
 
-async def backfill_deep_funding(symbols: list[str] | None = None) -> dict[str, int]:
+async def backfill_deep_funding(
+    symbols: list[str] | None = None, start_ms: int | None = None
+) -> dict[str, int]:
+    """Funding settlements into BFUNDHIST:{symbol}.
+
+    start_ms=None (the default) fetches the full history -- the one-time deep
+    backfill. The 15-minute scheduler refresh passes a recent window instead:
+    it used to re-download and re-upsert all ~29,000 settlements since 2019
+    on every run (~30 Binance pages and ~29k row writes each time, every 15
+    minutes) to pick up at most one new 8-hourly print per symbol. The window
+    still reaches back to the newest STORED settlement, so an outage longer
+    than the window cannot leave a permanent hole, and a symbol with nothing
+    stored gets its full history.
+    """
     symbols = symbols or list(_FUNDING_PERP)
     counts: dict[str, int] = {}
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -212,8 +243,13 @@ async def backfill_deep_funding(symbols: list[str] | None = None) -> dict[str, i
             perp = _FUNDING_PERP.get(symbol)
             if perp is None:
                 continue
+            symbol_start = _FUNDING_START_MS
+            if start_ms is not None:
+                newest = await load_candles_df(f"{FUNDING_PREFIX}{symbol}", "8h", limit=1)
+                if len(newest):
+                    symbol_start = min(start_ms, int(newest["time"].iloc[-1]) * 1000)
             try:
-                rows = await fetch_binance_funding_history_deep(perp, client=client)
+                rows = await fetch_binance_funding_history_deep(perp, start_ms=symbol_start, client=client)
                 if rows:
                     await upsert_candles(f"{FUNDING_PREFIX}{symbol}", "8h", rows)
                 counts[symbol] = len(rows)

@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from app.backtest.engine import BacktestConfig, Trade, run_backtest
 from app.backtest.report import BacktestReport, build_report
 from app.core.symbols import SymbolRegistry
+from app.config import get_settings
 from app.data.query import load_candles_df, load_pseudo_series_df
 from app.features.feature_pipeline import build_feature_frame
 from app.strategy.ensemble import SignalEnsemble, WeightedStrategy
@@ -47,6 +48,9 @@ class StrategyPerformance:
     by_symbol: list[SymbolPerformance]
 
 
+_EXIT_DEFAULTS = get_settings()
+
+
 async def evaluate_all_strategies(
     registry: SymbolRegistry,
     resolution: str = "15m",
@@ -54,10 +58,16 @@ async def evaluate_all_strategies(
     max_leverage: float = 15.0,
     min_leverage: float = 10.0,
     margin_per_trade_pct: float = 0.10,
-    atr_stop_multiple: float = 2.0,
-    atr_take_profit_multiple: float = 3.0,
-    atr_breakeven_trigger_multiple: float = 0.5,
-    atr_tightened_trail_multiple: float = 0.4,
+    # Defaults come from Settings, never from literals. These four used to be
+    # hardcoded at the PRE-2026-09-03 values (2.0 / 3.0 / 0.5 / 0.4) -- the
+    # aggressive exit policy that was measured over 9 years as ruinous (payoff
+    # 0.59, out-of-sample -75.2%). The only caller passes settings explicitly
+    # so nothing ever ran on them, but a second caller relying on the defaults
+    # would have silently backtested a policy the live system abandoned.
+    atr_stop_multiple: float = _EXIT_DEFAULTS.atr_stop_multiple,
+    atr_take_profit_multiple: float = _EXIT_DEFAULTS.atr_take_profit_multiple,
+    atr_breakeven_trigger_multiple: float = _EXIT_DEFAULTS.atr_breakeven_trigger_multiple,
+    atr_tightened_trail_multiple: float = _EXIT_DEFAULTS.atr_tightened_trail_multiple,
 ) -> list[StrategyPerformance]:
     """Backtests each strategy in isolation (weight=1, no ensemble blending)
     across every configured symbol, using whatever historical data is already

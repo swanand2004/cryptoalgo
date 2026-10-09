@@ -60,6 +60,11 @@ class _FakeDeltaClient:
         self.cancel_all_calls.append(body)
         return {}
 
+    async def request(self, method: str, path: str, *, json_body=None, auth=False, params=None) -> dict:
+        # LiveBroker sets per-product leverage before position-opening orders.
+        self.leverage_calls = getattr(self, "leverage_calls", []) + [(path, json_body)]
+        return {}
+
 
 def _broker(client: _FakeDeltaClient) -> LiveBroker:
     settings = Settings(delta_api_key="k", delta_api_secret="s")

@@ -12,12 +12,14 @@ from app.data.app_state import (
     is_kill_switch_on,
     set_kill_switch,
     set_state,
-    set_trading_mode,
 )
 from app.data.flush import flush_market_cache_to_db
+from app.execution.live_broker import fresh_balance
 from app.data.ingest_rest import backfill_symbol_history
 from app.gold.engine import build_gold_snapshot, save_gold_snapshot
 from app.gold.ingest import gold_incremental_backfill
+from app.data.retention import run_retention
+from app.core.memory import release_free_memory
 from app.ml.train import train_and_save
 from app.trading_loop import run_trading_tick
 
@@ -32,7 +34,7 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
         flush_market_cache_to_db, "interval", seconds=5, args=[runtime.cache], id="flush_market_cache", max_instances=1
     )
     scheduler.add_job(
-        runtime.paper_broker.check_resting_orders, "interval", seconds=5, id="paper_resting_orders", max_instances=1
+        runtime.order_manager.process_resting_fills, "interval", seconds=5, id="paper_resting_orders", max_instances=1
     )
     scheduler.add_job(
         runtime.paper_broker.check_stop_loss_take_profit,
@@ -51,6 +53,25 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
     )
     scheduler.add_job(
         _incremental_backfill, "interval", minutes=5, args=[runtime], id="incremental_backfill", max_instances=1, next_run_time=now
+    )
+    # Runs BEFORE the first trading tick can matter, and often: this is the
+    # trading signal's data source, not a research feed.
+    scheduler.add_job(
+        _incremental_ladder_history,
+        "interval",
+        minutes=15,
+        args=[runtime],
+        id="incremental_ladder_history",
+        max_instances=1,
+        next_run_time=now,
+    )
+    # The 15-minute refresh above can leave the just-closed hour stored with only
+    # its first minutes for up to 15 min; this one, 30 s past every hour, stores
+    # its final values (and the new forming hour) so the Analyst's closed-bar
+    # view is current within about a minute (service.final_bars, 2026-10-07).
+    scheduler.add_job(
+        _binance_hour_close_refresh, "cron", minute=0, second=30, args=[runtime],
+        id="binance_hour_close_refresh", max_instances=1, coalesce=True, misfire_grace_time=600,
     )
     scheduler.add_job(
         _incremental_backfill_external,
@@ -78,6 +99,34 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
         _drawdown_supervisor, "interval", seconds=15, args=[runtime],
         id="drawdown_supervisor", max_instances=1, next_run_time=now,
     )
+    # The rules-based Analyst (app/analyst): every minute on the four major coins; paper exits on every live tick (5 s) plus a 15-min hourly-bar sweep
+    # that catches anything crossed while the app was down.
+    scheduler.add_job(
+        _analyst_run, "interval", seconds=60, args=[runtime], id="analyst_run", max_instances=1,
+        next_run_time=now + dt.timedelta(minutes=2),
+    )
+    scheduler.add_job(
+        _analyst_gold_run, "interval", minutes=5, args=[runtime], id="analyst_gold_run", max_instances=1,
+        next_run_time=now + dt.timedelta(minutes=3),
+    )
+    # FRED dollar / real yields / breakevens + CFTC: read by the gold page and the
+    # Analyst's gold macro readings. Had no schedule (data froze 2026-09-02).
+    scheduler.add_job(
+        _macro_refresh, "cron", hour=6, minute=20, id="macro_refresh", max_instances=1,
+        next_run_time=now + dt.timedelta(minutes=6),
+    )
+    scheduler.add_job(
+        _analyst_paper_exits, "interval", minutes=15, id="analyst_paper_exits", max_instances=1,
+        next_run_time=now + dt.timedelta(minutes=5),
+    )
+    scheduler.add_job(
+        _analyst_live_exits, "interval", seconds=5, args=[runtime], id="analyst_live_exits", max_instances=1,
+        next_run_time=now + dt.timedelta(minutes=4),
+    )
+    scheduler.add_job(
+        _halted_means_flat, "interval", seconds=15, args=[runtime],
+        id="halted_means_flat", max_instances=1, next_run_time=now,
+    )
     scheduler.add_job(
         _daily_kill_switch_reset, "interval", seconds=60,
         id="daily_kill_switch_reset", max_instances=1, next_run_time=now,
@@ -87,7 +136,8 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
     # scheduler._incremental_backfill and feature_pipeline.build_feature_frame)
     # so live trading wasn't stuck on models trained against broken features
     # until the next scheduled run.
-    scheduler.add_job(_retrain_models, "cron", hour=3, minute=0, args=[runtime], id="ml_retrain", max_instances=1)
+    if runtime.settings.retrain_in_process:
+        scheduler.add_job(_retrain_models, "cron", hour=3, minute=0, args=[runtime], id="ml_retrain", max_instances=1)
     scheduler.add_job(
         _record_equity, "interval", seconds=60, args=[runtime], id="record_equity", max_instances=1, next_run_time=now
     )
@@ -101,9 +151,49 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
     )
     # Offset from ml_retrain (03:00) to avoid both heavy retrains competing
     # for CPU at the exact same moment.
-    scheduler.add_job(_gold_retrain, "cron", hour=3, minute=30, args=[runtime], id="gold_retrain", max_instances=1)
+    if runtime.settings.retrain_in_process:
+        scheduler.add_job(_gold_retrain, "cron", hour=3, minute=30, args=[runtime], id="gold_retrain", max_instances=1)
+    # Opt-in Analyst weight training (Settings.analyst_training_enabled): clear
+    # of the 03:00 ML and 03:30 gold retrains; does nothing while it is off.
+    scheduler.add_job(_analyst_training, "cron", hour=2, minute=40, args=[runtime], id="analyst_training", max_instances=1)
+    # PAPER S7 options tracker (app/options/s7.py): never places an order. Every
+    # 5 min, aligned to :00, so the Friday 12:00 UTC entry fires on time; the
+    # same tick settles expired paper options.
+    scheduler.add_job(
+        _options_s7_tick, "cron", minute="*/5", args=[runtime], id="options_s7", max_instances=1,
+        coalesce=True, misfire_grace_time=240,
+    )
+    # Every 6 h (was daily): a daily prune let each raw table reach retention +
+    # 1 day before it ran. Orderbook snapshots 1 day, 1m/5m candles 4/14 days
+    # (app/data/retention.py run_retention; settings at the end of config.py).
+    scheduler.add_job(
+        run_retention, "cron", hour="4,10,16,22", minute=15, args=[runtime.settings],
+        id="prune_raw_ticks", max_instances=1, coalesce=True, misfire_grace_time=3600,
+    )
+    # ML book filter v1 (app/ml/book_filter.py): daily multipliers from the bar
+    # closing 00:00 UTC, applied from 01:00. Retried until the price refresh has
+    # finalised that bar; the 00:50 attempt stores a stale (all 1.0) record.
+    scheduler.add_job(
+        _ml_book_filter, "cron", hour=0, minute="5,20,35,50", args=[runtime],
+        id="ml_book_filter", max_instances=1, coalesce=True, misfire_grace_time=600,
+    )
+    # Owner's Telegram morning report at 09:05 IST (03:35 UTC): yesterday's P&L. Returns at once
+    # while telegram_bot_token / telegram_chat_id are unset (the default).
+    scheduler.add_job(
+        _telegram_daily_summary, "cron", hour=3, minute=35, args=[runtime],  # 09:05 IST, yesterday's P&L
+        id="telegram_daily_summary", max_instances=1, misfire_grace_time=1800,
+    )
 
     return scheduler
+
+
+async def _telegram_daily_summary(runtime) -> None:
+    from app.notify.telegram import send_daily_summary
+
+    try:
+        await send_daily_summary(runtime)
+    except Exception:
+        logger.warning("Telegram daily summary failed", exc_info=True)
 
 
 async def _record_equity(runtime) -> None:
@@ -162,6 +252,58 @@ async def _incremental_backfill(runtime) -> None:
                 )
         except Exception:
             logger.exception("Incremental backfill failed for %s", product.symbol)
+
+
+async def _incremental_ladder_history(runtime) -> None:
+    """Keeps BINANCE:{symbol} hourly prices and BFUNDHIST:{symbol} funding
+    current, because the live trading signal is computed from them.
+
+    This is not a research-data refresh, it is a TRADING dependency. Before
+    trend_ladder went live these two series were backfill-only -- populated
+    once by a script and never touched again -- which was fine when they only
+    fed backtests. It is not fine now: a frozen price series makes the ladder
+    hold its last signal forever while the market moves, and the loop cannot
+    tell that apart from genuine conviction.
+
+    The loop does defend itself (`ladder_max_bar_age_seconds` stops trading on
+    a stale frame), so the worst case here is that the system stops trading
+    rather than trades wrongly. This job is what keeps that from happening.
+
+    Runs every 15 minutes against a ~10-day window: bars are hourly, so this
+    is deliberately far more often than strictly needed, to leave room for
+    several consecutive failures before the staleness guard trips.
+    """
+    from app.data.ingest_binance_history import backfill_deep_history, backfill_deep_funding
+
+    symbols = [p.symbol for p in runtime.registry.all()]
+    if not symbols:
+        return
+    start_ms = int((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)).timestamp() * 1000)
+    try:
+        await backfill_deep_history(symbols=symbols, resolutions=("1h", "4h"), start_ms=start_ms)
+    except Exception:
+        logger.exception("Incremental BINANCE price refresh failed -- ladder may go stale")
+    try:
+        await backfill_deep_funding(symbols=symbols, start_ms=start_ms)  # recent window, not 2019 onwards
+    except Exception:
+        logger.exception("Incremental BFUNDHIST funding refresh failed")
+
+
+async def _binance_hour_close_refresh(runtime) -> None:
+    """Light top-of-hour BINANCE 1h refresh (last 3 h only): finalises the hour
+    that just closed. The 15-minute _incremental_ladder_history stays the main
+    refresh; this only shortens the window in which the newest stored "closed"
+    bar is still the partial one."""
+    from app.data.ingest_binance_history import backfill_deep_history
+
+    symbols = [p.symbol for p in runtime.registry.all()]
+    if not symbols:
+        return
+    start_ms = int((dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=3)).timestamp() * 1000)
+    try:
+        await backfill_deep_history(symbols=symbols, resolutions=("1h",), start_ms=start_ms)
+    except Exception:
+        logger.exception("Top-of-hour BINANCE 1h refresh failed (the 15-minute refresh still runs)")
 
 
 async def _incremental_backfill_external(runtime) -> None:
@@ -242,6 +384,119 @@ async def _live_sync(runtime) -> None:
         logger.exception("Live sync failed")
 
 
+async def _sync_external_flows(runtime) -> None:
+    """Applies new deposits/withdrawals to the risk anchors (live only) so the
+    checks that follow measure trading P&L, not money moved in or out."""
+    if await get_trading_mode() != "live":
+        return
+    broker = getattr(getattr(runtime, "order_manager", None), "live_broker", None)
+    if broker is None or not hasattr(broker, "external_flows"):
+        return
+    try:
+        await runtime.risk_manager.apply_external_flows(await broker.external_flows())
+    except Exception:
+        logger.exception("Could not read deposits/withdrawals from Delta -- checks run on raw equity")
+
+
+async def _analyst_run(runtime) -> None:
+    from app.analyst.service import run_analysis
+
+    try:
+        await run_analysis(runtime)
+    except Exception:
+        logger.exception("Analyst run failed")
+
+
+async def _analyst_gold_run(runtime) -> None:
+    from app.analyst.service import run_gold_analysis
+
+    try:
+        await run_gold_analysis(runtime)
+    except Exception:
+        logger.exception("Analyst gold run failed")
+
+
+async def _macro_refresh() -> None:
+    from app.gold.macro_factors import backfill_macro_factors
+
+    try:
+        await backfill_macro_factors()
+    except Exception:
+        logger.exception("Macro refresh failed")
+
+
+async def _analyst_live_exits(runtime) -> None:
+    from app.analyst import service
+    from app.analyst.execution import manage_open_trades
+
+    try:
+        await manage_open_trades(runtime, {**service._latest, **service._latest_gold})
+    except Exception:
+        logger.exception("Analyst live exit check failed")
+
+
+async def _ml_book_filter(runtime) -> None:
+    from app.ml.book_filter import run_daily_job
+
+    try:
+        now = dt.datetime.now(dt.timezone.utc)
+        await run_daily_job(runtime.settings, now=now, final_attempt=now.minute >= 50)
+    except Exception:
+        logger.exception("ML book filter daily job failed -- sizing unaffected (multipliers stay 1.0)")
+    finally:
+        release_free_memory()
+
+
+async def _options_s7_tick(runtime) -> None:
+    from app.options.s7 import run_s7_tick
+
+    try:
+        await run_s7_tick(runtime)
+    except Exception:
+        logger.exception("Options S7 paper tick failed")
+
+
+async def _analyst_training(runtime) -> None:
+    if not getattr(runtime.settings, "analyst_training_enabled", False):
+        return
+    from app.analyst.training import run_training_job
+
+    try:
+        await run_training_job(runtime.settings)  # CPU part runs in a worker thread
+    except Exception:
+        logger.exception("Analyst training failed -- weights unchanged")
+    finally:
+        release_free_memory()
+
+
+async def _analyst_paper_exits() -> None:
+    from app.analyst.service import update_paper_trades
+
+    try:
+        await update_paper_trades()
+    except Exception:
+        logger.exception("Analyst paper-trade update failed")
+
+
+async def _halted_means_flat(runtime) -> None:
+    """While the kill switch is on the account must be flat. Every supervisor
+    stands down while it is on (nothing manages a position then), so anything
+    still open -- an order that was already in flight when the halt came, or
+    a manual trade -- would sit unwatched until the switch is turned off.
+    Close it."""
+    if not await is_kill_switch_on():
+        return
+    positions = await runtime.order_manager.get_positions()
+    open_now = [p for p in positions.values() if p.size != 0]
+    if not open_now:
+        return
+    logger.warning(
+        "Kill switch is on but %d position(s) are open (%s) -- closing them",
+        len(open_now), ", ".join(f"{p.symbol} {p.size:+d}" for p in open_now),
+    )
+    await runtime.order_manager.flatten_all(mode_override=await get_trading_mode(), reason="kill_switch")
+
+
 async def _daily_loss_supervisor(runtime) -> None:
     """Proactively (not just reactively on the next order submission)
     auto-engages the kill switch the FIRST time today's mark-to-market
@@ -267,7 +522,9 @@ async def _daily_loss_supervisor(runtime) -> None:
     if await is_kill_switch_on():
         return  # already engaged (manually, or by this job earlier today) -- nothing to do
 
-    equity = await runtime.order_manager.get_equity()
+    with fresh_balance():  # never the shared cache here -- see live_broker.fresh_balance
+        equity = await runtime.order_manager.get_equity()
+    await _sync_external_flows(runtime)  # AFTER the balance read: a deposit in it is in the list
     ok, reason = await runtime.risk_manager.check_daily_loss(equity)
     if ok:
         return
@@ -278,10 +535,14 @@ async def _daily_loss_supervisor(runtime) -> None:
 
     logger.warning("Daily loss limit breached -- auto-engaging kill switch: %s", reason)
     try:
+        # HALT FIRST, then flatten: with the flag set, every new entry is
+        # refused (OrderManager.submit + run_trading_tick check it), so a
+        # trading tick already in flight cannot open a position in the gap --
+        # 2026-10-05 one did, buying BNB 2 s after this flattened ETH. Halt,
+        # don't switch to paper: the account stays on real money.
+        await set_kill_switch(True, reason=f"daily loss limit -- {reason}")  # reason = owner alert text
         mode_to_flatten = await get_trading_mode()
-        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten)
-        await set_kill_switch(True)
-        await set_trading_mode("paper")
+        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten, reason="daily_loss")
     finally:
         # Recorded even if flattening raised partway through, so a bug in
         # the flatten path can't turn into re-attempting it (and re-halting
@@ -306,7 +567,9 @@ async def _daily_profit_target_supervisor(runtime) -> None:
     if await is_kill_switch_on():
         return  # already engaged (manually, or by this job earlier today) -- nothing to do
 
-    equity = await runtime.order_manager.get_equity()
+    with fresh_balance():  # never the shared cache here -- see live_broker.fresh_balance
+        equity = await runtime.order_manager.get_equity()
+    await _sync_external_flows(runtime)  # AFTER the balance read: a deposit in it is in the list
     ok, reason = await runtime.risk_manager.check_daily_profit_target(equity)
     if ok:
         return
@@ -317,10 +580,14 @@ async def _daily_profit_target_supervisor(runtime) -> None:
 
     logger.warning("Daily profit target reached -- auto-engaging kill switch: %s", reason)
     try:
+        # HALT FIRST, then flatten: with the flag set, every new entry is
+        # refused (OrderManager.submit + run_trading_tick check it), so a
+        # trading tick already in flight cannot open a position in the gap --
+        # 2026-10-05 one did, buying BNB 2 s after this flattened ETH. Halt,
+        # don't switch to paper: the account stays on real money.
+        await set_kill_switch(True, reason=f"daily profit target -- {reason}")  # reason = owner alert text
         mode_to_flatten = await get_trading_mode()
-        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten)
-        await set_kill_switch(True)
-        await set_trading_mode("paper")
+        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten, reason="profit_target")
     finally:
         await set_state("daily_profit_target_auto_triggered_day", today)
 
@@ -345,17 +612,23 @@ async def _drawdown_supervisor(runtime) -> None:
     if await is_kill_switch_on():
         return
 
-    equity = await runtime.order_manager.get_equity()
+    with fresh_balance():  # never the shared cache here -- see live_broker.fresh_balance
+        equity = await runtime.order_manager.get_equity()
+    await _sync_external_flows(runtime)  # AFTER the balance read: a deposit in it is in the list
     ok, reason = await runtime.risk_manager.check_max_drawdown(equity)
     if ok:
         return
 
     logger.warning("Max drawdown breached -- auto-engaging kill switch: %s", reason)
     try:
+        # HALT FIRST, then flatten: with the flag set, every new entry is
+        # refused (OrderManager.submit + run_trading_tick check it), so a
+        # trading tick already in flight cannot open a position in the gap --
+        # 2026-10-05 one did, buying BNB 2 s after this flattened ETH. Halt,
+        # don't switch to paper: the account stays on real money.
+        await set_kill_switch(True, reason=f"max drawdown -- {reason}")  # reason = owner alert text
         mode_to_flatten = await get_trading_mode()
-        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten)
-        await set_kill_switch(True)
-        await set_trading_mode("paper")
+        await runtime.order_manager.flatten_all(mode_override=mode_to_flatten, reason="max_drawdown")
     finally:
         # Set even if flattening raised partway through: a halt that failed
         # to fully flatten is MORE reason to stay halted, not less.
@@ -409,10 +682,13 @@ async def _daily_kill_switch_reset() -> None:
 
 async def _retrain_models(runtime) -> None:
     from app.data.query import load_candles_df, load_pseudo_series_df
-    from app.features.feature_pipeline import build_feature_frame
     from app.ml.train import ML_RESOLUTIONS
 
-    for symbol in runtime.registry.symbols:
+    # Core symbols only when the size-aware universe is on: the small-account
+    # fillers never feed an ML model, and training them would multiply the
+    # nightly job on a 1-vCPU server for nothing.
+    core = set(runtime.settings.core_symbol_list)
+    for symbol in [s for s in runtime.registry.symbols if not core or s in core]:
         for resolution, cfg in ML_RESOLUTIONS.items():
             try:
                 candles = await load_candles_df(symbol, resolution, limit=cfg["limit"])
@@ -434,23 +710,27 @@ async def _retrain_models(runtime) -> None:
                 dvol = await load_pseudo_series_df(f"DVOL:{symbol}", "1h")
                 news = await load_pseudo_series_df(f"NEWS:{symbol}", "1h")
 
-                features = build_feature_frame(
-                    candles,
-                    funding=funding,
-                    mark=mark,
-                    spot=spot,
-                    fear_greed=fear_greed,
-                    binance_funding=binance_funding,
-                    binance_oi=binance_oi,
-                    binance_lsr=binance_lsr,
-                    dvol=dvol,
-                    news=news,
+                # Off the event loop, like the gold retrain: run inline, the
+                # feature build + LightGBM fit froze trading ticks, the
+                # kill-switch supervisors and the API for the whole retrain
+                # (measured 41 s on a laptop; minutes on a 1-core VPS).
+                await asyncio.to_thread(
+                    _train_crypto_sync, candles, symbol, resolution, cfg["horizon_bars"],
+                    dict(funding=funding, mark=mark, spot=spot, fear_greed=fear_greed,
+                         binance_funding=binance_funding, binance_oi=binance_oi,
+                         binance_lsr=binance_lsr, dvol=dvol, news=news),
                 )
-                train_and_save(features, symbol=symbol, resolution=resolution, horizon_bars=cfg["horizon_bars"])
             except Exception:
                 logger.exception("Retrain failed for %s %s", symbol, resolution)
 
     await runtime.refresh_ensembles()
+
+
+def _train_crypto_sync(candles, symbol: str, resolution: str, horizon_bars: int, series: dict) -> None:
+    from app.features.feature_pipeline import build_feature_frame
+
+    features = build_feature_frame(candles, **series)
+    train_and_save(features, symbol=symbol, resolution=resolution, horizon_bars=horizon_bars)
 
 
 async def _gold_research_tick(runtime) -> None:
@@ -467,6 +747,8 @@ async def _gold_research_tick(runtime) -> None:
         save_gold_snapshot(snapshot)
     except Exception:
         logger.exception("Gold research tick failed")
+    finally:
+        release_free_memory()
 
 
 def _train_gold_horizon_sync(candles, horizon: str, cfg: dict):

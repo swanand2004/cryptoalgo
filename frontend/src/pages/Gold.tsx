@@ -1,159 +1,50 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { CoinCard, TradeTable } from './Analyst'
 import { useQuery } from '@tanstack/react-query'
-import { api, type GoldPrediction } from '../lib/api'
-import { signalTier } from '../lib/signalTier'
-import { CandleChart } from '../components/CandleChart'
+import { api, type GoldTrade, type SignalBoard } from '../lib/api'
+import { CandleChart, type ChartMarker, type PriceLine } from '../components/CandleChart'
+import { formatISTShort } from '../lib/time'
+import { ErrorState } from '../components/ui'
+import { useIsPhone } from '../lib/hooks'
 
-const REGIME_LABEL: Record<string, { label: string; className: string }> = {
-  trending: { label: 'Trending', className: 'bg-emerald-950 text-emerald-400 border border-emerald-900' },
-  mean_reverting: { label: 'Mean-Reverting', className: 'bg-sky-950 text-sky-400 border border-sky-900' },
-  random_walk: { label: 'Random Walk', className: 'bg-neutral-800 text-neutral-400' },
-  unknown: { label: 'Unknown', className: 'bg-neutral-800 text-neutral-500' },
+// Gold page: the current call per timeframe with its trade levels, a chart
+// with those levels drawn on it, and the support/resistance map. How the call
+// is computed lives in app/gold/signal_board.py, not on the page.
+
+type Timeframe = 'hourly' | 'daily'
+type Board = SignalBoard | null | undefined
+type Trade = NonNullable<SignalBoard['trade']>
+
+const TIMEFRAMES: Record<Timeframe, { label: string; sub: string; resolution: string; candles: number; barSeconds: number }> = {
+  hourly: { label: 'Intraday', sub: '1H · next few hours', resolution: '1h', candles: 240, barSeconds: 3600 },
+  daily: { label: 'Swing', sub: '1D · next few days', resolution: '1d', candles: 100, barSeconds: 86_400 },
 }
 
-const HORIZON_LABEL: Record<string, string> = {
-  intraday: 'Intraday',
-  short_term: 'Short-Term',
-  long_term: 'Long-Term',
-}
-const HORIZON_ORDER = ['intraday', 'short_term', 'long_term']
-const HORIZON_HINT: Record<string, string> = {
-  intraday: '~1 hour ahead, 15m bars',
-  short_term: '~1 day ahead, 1h bars',
-  long_term: '~1 week ahead, 1d bars',
+const DIRECTION_TEXT = { BUY: 'text-emerald-400', SELL: 'text-red-400', NEUTRAL: 'text-neutral-300' } as const
+const DIRECTION_BAR = { BUY: 'bg-emerald-500', SELL: 'bg-red-500', NEUTRAL: 'bg-neutral-500' } as const
+
+const STATUS_STYLE: Record<Trade['status'], string> = {
+  ACTIVE: 'border-sky-800/70 bg-sky-950/40 text-sky-300',
+  'TP HIT': 'border-emerald-700 bg-emerald-900/40 text-emerald-200',
+  'STOPPED OUT': 'border-red-900/70 bg-red-950/40 text-red-300',
 }
 
-const ACTION_STYLE: Record<string, string> = {
-  BUY: 'bg-emerald-600 text-emerald-50',
-  SELL: 'bg-red-600 text-red-50',
-  HOLD: 'bg-neutral-800 text-neutral-400',
+// How each finished trade ended, for the card and the trade logs.
+const RESULT_STYLE: Record<string, { label: string; cls: string; marker: string }> = {
+  TP: { label: 'TP1 hit', cls: 'border-emerald-800/70 bg-emerald-950/50 text-emerald-300', marker: '#34d399' },
+  SL: { label: 'SL hit', cls: 'border-red-900/70 bg-red-950/50 text-red-300', marker: '#f87171' },
 }
 
-// Risk is the model's own honest walk-forward track record for this
-// horizon, not a generic disclaimer -- see backend/app/gold/engine.py's
-// _risk_level. "very_high" covers both "below coin-flip" and "too little
-// data to trust," which is deliberately where gold's short_term/long_term
-// horizons currently sit.
-const RISK_STYLE: Record<string, { label: string; className: string }> = {
-  low: { label: 'Low risk', className: 'bg-emerald-950 text-emerald-400 border border-emerald-900' },
-  medium: { label: 'Medium risk', className: 'bg-amber-950 text-amber-400 border border-amber-900' },
-  high: { label: 'High risk', className: 'bg-orange-950 text-orange-400 border border-orange-900' },
-  very_high: { label: 'Very high risk', className: 'bg-red-950 text-red-400 border border-red-900' },
+function statusLabel(status: Trade['status']): string {
+  return status === 'TP HIT' ? 'TP1 HIT' : status
 }
 
-const DEEP_STAGES: {
-  key: string
-  title: string
-  hint: string
-  kind: 'signed' | 'confidence'
-}[] = [
-  {
-    key: 'deep_trend_consensus',
-    title: '1. Trend Consensus',
-    hint: '10 trend indicators (EMA spreads, MACD, ROC, regression slope) -- how many agree on direction',
-    kind: 'signed',
-  },
-  {
-    key: 'deep_meanrev_signal',
-    title: '2. Mean-Reversion Pressure',
-    hint: 'Bollinger & moving-average z-scores -- how far price sits from "fair value" and which way it should snap back',
-    kind: 'signed',
-  },
-  {
-    key: 'deep_regime_confidence',
-    title: '3. Regime Confidence',
-    hint: 'Efficiency ratio + ADX -- how much conviction to have at all right now (low = choppy, high = a genuine trend)',
-    kind: 'confidence',
-  },
-  {
-    key: 'deep_astro_consensus',
-    title: '4. Astrology Consensus',
-    hint: '6 signed planetary-transit readings -- benefic vs malefic tilt, agreement across independent systems',
-    kind: 'signed',
-  },
-]
+const EVENT_NAME: Record<string, string> = { FOMC: 'Fed rate decision', CPI: 'US inflation (CPI)', NFP: 'US jobs report' }
 
-function SignedBar({ value }: { value: number }) {
-  const clamped = Math.max(-1, Math.min(1, value))
-  const pct = Math.abs(clamped) * 50
-  const positive = clamped >= 0
-  return (
-    <div className="relative h-2 w-full rounded-full bg-neutral-800 overflow-hidden">
-      <div className="absolute left-1/2 top-0 bottom-0 w-px bg-neutral-700" />
-      <div
-        className={`absolute top-0 bottom-0 rounded-full transition-all duration-500 ${positive ? 'bg-emerald-500' : 'bg-red-500'}`}
-        style={positive ? { left: '50%', width: `${pct}%` } : { right: '50%', width: `${pct}%` }}
-      />
-    </div>
-  )
-}
+const money = (v: number) => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const signed = (v: number, digits = 2) => `${v >= 0 ? '+' : ''}${v.toFixed(digits)}`
 
-function ConfidenceBar({ value }: { value: number }) {
-  const pct = Math.max(0, Math.min(1, value)) * 100
-  return (
-    <div className="relative h-2 w-full rounded-full bg-neutral-800 overflow-hidden">
-      <div className="absolute inset-y-0 left-0 rounded-full bg-amber-500 transition-all duration-500" style={{ width: `${pct}%` }} />
-    </div>
-  )
-}
-
-function DeepAnalysisEngine({ indicators }: { indicators: Record<string, number> }) {
-  const composite = indicators['deep_composite_score']
-  const tier = composite != null ? signalTier(composite) : null
-
-  return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
-      <div className="text-sm font-medium text-neutral-300 mb-1">Deep Analysis Engine</div>
-      <div className="text-xs text-neutral-600 mb-4">
-        A 4-stage cascade re-evaluated every ~3-minute tick: each stage's own reading feeds into the next, ending in one
-        regime-adaptive composite score below. Second-order analysis on top of the {Object.keys(indicators).length}
-        {' '}underlying indicators, not a replacement for them.
-      </div>
-
-      <div className="space-y-3">
-        {DEEP_STAGES.map((stage, i) => {
-          const value = indicators[stage.key]
-          return (
-            <div key={stage.key} className="flex items-center gap-3">
-              <div className="w-44 shrink-0">
-                <div className="text-xs font-medium text-neutral-300">{stage.title}</div>
-              </div>
-              <div className="flex-1 group relative">
-                {stage.kind === 'signed' ? <SignedBar value={value ?? 0} /> : <ConfidenceBar value={value ?? 0} />}
-                <div className="absolute left-0 top-full mt-1 hidden group-hover:block text-[10px] text-neutral-500 bg-neutral-950 border border-neutral-800 rounded px-2 py-1 z-10 max-w-xs">
-                  {stage.hint}
-                </div>
-              </div>
-              <div className="w-14 shrink-0 text-right font-mono text-xs text-neutral-400 tabular-nums">
-                {value != null ? value.toFixed(2) : '--'}
-              </div>
-              {i < DEEP_STAGES.length - 1 && <div className="w-3 shrink-0 text-center text-neutral-700">&darr;</div>}
-            </div>
-          )
-        })}
-      </div>
-
-      <div className="mt-5 pt-4 border-t border-neutral-800 flex items-center justify-between">
-        <div>
-          <div className="text-xs font-medium text-neutral-400">Composite Score</div>
-          <div className="text-[11px] text-neutral-600 mt-0.5">
-            regime confidence &times; (trend/reversion blend) + astrology tilt
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="font-mono text-2xl text-neutral-100 tabular-nums">
-            {composite != null ? `${composite >= 0 ? '+' : ''}${composite.toFixed(3)}` : '--'}
-          </span>
-          {tier && <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${tier.badgeClass}`}>{tier.label}</span>}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** Re-renders on an interval so relative-time labels (countdowns, "Ns ago")
- * stay live without waiting for the next data refetch. */
-function useNowTick(intervalMs: number): number {
+function useNow(intervalMs: number) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), intervalMs)
@@ -162,570 +53,610 @@ function useNowTick(intervalMs: number): number {
   return now
 }
 
-function secondsAgoLabel(iso: string | null | undefined, now: number): string {
-  if (!iso) return 'never'
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return 'never'
-  const seconds = Math.max(0, Math.round((now - then) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
-  return `${Math.floor(seconds / 3600)}h ago`
+function ago(iso: string | null | undefined, now: number): string {
+  if (!iso) return ''
+  const mins = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60_000))
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.round(mins / 60)
+  if (hours < 48) return `${hours}h ago`
+  return `${Math.round(hours / 24)}d ago`
 }
 
-function countdownLabel(iso: string | null | undefined, now: number): string {
-  if (!iso) return '--'
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return '--'
-  return formatSecondsAway(Math.round((then - now) / 1000))
+function inHours(hours: number | null): string {
+  if (hours === null) return ''
+  if (hours < 1) return 'within the hour'
+  if (hours < 48) return `in ${Math.round(hours)}h`
+  return `in ${Math.round(hours / 24)} days`
 }
 
-function formatSecondsAway(seconds: number): string {
-  if (seconds <= 0) return 'now'
-  const days = Math.floor(seconds / 86400)
-  const hours = Math.floor((seconds % 86400) / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  if (days > 0) return `${days}d ${hours}h`
-  if (hours > 0) return `${hours}h ${minutes}m`
-  return `${minutes}m`
-}
+// ------------------------------------------------------------------ pieces
 
-function formatDaysAway(daysAway: number | null | undefined): string {
-  if (daysAway == null) return '--'
-  return formatSecondsAway(Math.round(daysAway * 86400))
-}
-
-function formatHoursAway(hoursAway: number | null | undefined): string {
-  if (hoursAway == null) return '--'
-  return formatSecondsAway(Math.round(hoursAway * 3600))
-}
-
-const MACRO_EVENT_HINT: Record<string, string> = {
-  FOMC: 'Fed rate decision -- moves gold via rate-path/USD-strength expectations',
-  CPI: 'US inflation print -- moves gold via real-yield expectations',
-  NFP: 'US jobs report -- moves gold via Fed-policy expectations',
-}
-
-/** Briefly highlights when a numeric value changes between refetches --
- * the "something is continuously happening" cue for the hero price. */
-function useFlashOnChange(value: number | null | undefined): boolean {
-  const previous = useRef(value)
-  const [flashing, setFlashing] = useState(false)
-  useEffect(() => {
-    if (value != null && previous.current != null && value !== previous.current) {
-      setFlashing(true)
-      const id = setTimeout(() => setFlashing(false), 700)
-      previous.current = value
-      return () => clearTimeout(id)
-    }
-    previous.current = value
-  }, [value])
-  return flashing
-}
-
-function EngineScanBar() {
+function Panel({ title, right, children }: { title: string; right?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="relative h-0.5 w-full overflow-hidden rounded-full bg-neutral-800">
-      <div className="gold-scan absolute inset-y-0 w-1/3 rounded-full bg-gradient-to-r from-transparent via-amber-400 to-transparent" />
-    </div>
+    <section className="min-w-0 rounded-xl border border-neutral-800 bg-neutral-900/50">
+      <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-neutral-800/70 px-4 py-2.5">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-neutral-300">{title}</h2>
+        {right}
+      </header>
+      <div className="p-4">{children}</div>
+    </section>
   )
 }
 
-/** How many of BTC/ETH/SOL currently support this call, given each one's
- * OWN most recent move and its correlation sign with gold (both already-
- * observable, no lookahead). Researched 2026-08-22: this contemporaneous
- * relationship has ZERO exploitable lead time for FORECASTING (checked
- * explicitly at lags from 15 minutes to 4 hours, on both 15m and 1h data --
- * none survived), so it's never used to move the model's own score. This is
- * a real-time CORROBORATION read for a human call, not a second vote baked
- * into the prediction itself. */
-function cryptoConfirmation(
-  action: 'BUY' | 'SELL' | 'HOLD',
-  crossAsset: import('../lib/api').GoldCrossAsset | undefined
-): { agree: number; disagree: number; total: number } | null {
-  if (!crossAsset?.ready || action === 'HOLD') return null
-  const wantSign = action === 'BUY' ? 1 : -1
-  let agree = 0
-  let disagree = 0
-  let total = 0
-  for (const asset of Object.values(crossAsset.assets)) {
-    if (asset.correlation == null || asset.recent_return_pct == null) continue
-    if (Math.abs(asset.correlation) < 0.15) continue // too decoupled right now to read anything from
-    const impliedDirection = Math.sign(asset.correlation) * Math.sign(asset.recent_return_pct)
-    total += 1
-    if (impliedDirection === wantSign) agree += 1
-    else if (impliedDirection === -wantSign) disagree += 1
-  }
-  return total > 0 ? { agree, disagree, total } : null
-}
-
-/** Concrete levels to watch: where the call is confirmed, and where it is
- * wrong. A target price alone says where the model thinks price is going but
- * nothing about when to stop believing it. Derived from real recent highs and
- * lows plus an ATR-scaled invalidation, so the numbers adapt to how volatile
- * gold currently is rather than being fixed percentages. */
-function LevelsPanel({
-  levels,
-  action,
-  price,
-}: {
-  levels: import('../lib/api').GoldLevels | undefined
-  action: 'BUY' | 'SELL' | 'HOLD'
+function Header({ price, change, asOf, now, event }: {
   price: number | null
+  change: number | null
+  asOf: string | null | undefined
+  now: number
+  event: { event: string | null; hours_away: number | null; at: string | null } | undefined
 }) {
-  if (!levels || levels.breakout_above == null || levels.breakdown_below == null) return null
-
-  const fmt = (v: number | null) =>
-    v == null ? '--' : `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-  const pct = (v: number | null) => (v == null ? '' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
-
-  // For a SELL the confirming break is DOWNWARD, so the labels follow the
-  // direction of the call rather than always saying "up = good".
-  const confirmLabel = action === 'SELL' ? 'Confirms below' : 'Confirms above'
-  const breakLabel = action === 'SELL' ? 'Breaks above' : 'Breaks below'
-  const isHold = action === 'HOLD'
-
   return (
-    <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-950/50 p-2.5">
-      <div className="text-[10px] uppercase tracking-wider text-neutral-500 mb-2">
-        {isHold ? 'Range to watch' : 'Levels'}
-      </div>
-
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="text-emerald-400">{isHold ? 'Breaks up above' : confirmLabel}</span>
-          <span className="font-mono text-neutral-200 tabular-nums">
-            {fmt(levels.breakout_above)}{' '}
-            <span className="text-neutral-600">{pct(levels.distance_to_breakout_pct)}</span>
-          </span>
+    <div className="relative overflow-hidden rounded-xl border border-neutral-800 bg-gradient-to-br from-amber-950/40 via-neutral-900 to-neutral-950 p-5 sm:p-6">
+      <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-amber-500/10 blur-3xl" />
+      <div className="relative flex flex-wrap items-end justify-between gap-5">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-60 motion-reduce:animate-none" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
+            </span>
+            <span className="text-xs font-medium uppercase tracking-[0.22em] text-amber-300">Gold</span>
+            <span className="text-xs text-neutral-400">XAU/USD · Delta XAUT</span>
+          </div>
+          <div className="mt-2 font-mono text-4xl tabular-nums text-neutral-50 sm:text-5xl">
+            {price !== null ? `$${money(price)}` : '--'}
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-sm">
+            {change !== null && (
+              <span
+                className={`rounded-md px-2 py-0.5 font-mono ${
+                  change >= 0 ? 'bg-emerald-950/60 text-emerald-300' : 'bg-red-950/60 text-red-300'
+                }`}
+              >
+                {signed(change)}% 24h
+              </span>
+            )}
+            {asOf && <span className="text-xs text-neutral-400">updated {ago(asOf, now)}</span>}
+          </div>
         </div>
-
-        {price != null && (
-          <div className="flex items-center justify-between text-[11px] border-y border-neutral-800/70 py-1">
-            <span className="text-neutral-400">Now</span>
-            <span className="font-mono text-neutral-100 tabular-nums">{fmt(price)}</span>
+        {event?.event && (
+          <div className="rounded-lg border border-amber-900/50 bg-neutral-950/50 px-4 py-2.5 sm:text-right">
+            <div className="text-[10px] uppercase tracking-[0.16em] text-neutral-400">Next market event</div>
+            <div className="mt-0.5 font-medium text-amber-300">{EVENT_NAME[event.event] ?? event.event}</div>
+            <div className="text-xs text-neutral-400">
+              {inHours(event.hours_away)}
+              {event.at && <span className="text-neutral-400"> · {formatISTShort(event.at)}</span>}
+            </div>
           </div>
         )}
-
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="text-red-400">{isHold ? 'Breaks down below' : breakLabel}</span>
-          <span className="font-mono text-neutral-200 tabular-nums">
-            {fmt(levels.breakdown_below)}{' '}
-            <span className="text-neutral-600">{pct(levels.distance_to_breakdown_pct)}</span>
-          </span>
-        </div>
-      </div>
-
-      {levels.invalidation != null && (
-        <div className="mt-2 pt-2 border-t border-neutral-800/70 flex items-center justify-between text-[11px]">
-          <span className="text-amber-400">Invalidation (2 ATR)</span>
-          <span className="font-mono text-neutral-300 tabular-nums">{fmt(levels.invalidation)}</span>
-        </div>
-      )}
-
-      <div className="mt-1.5 text-[10px] text-neutral-600">
-        range over last {levels.range_window_bars} bars
-        {levels.atr != null && ` · ATR ${fmt(levels.atr)}`}
       </div>
     </div>
   )
 }
 
-const FACTOR_LABEL: Record<string, string> = {
-  real_rate_change: 'Real rates (10y TIPS)',
-  dollar_change: 'US dollar (broad TWI)',
-  breakeven_inflation: 'Breakeven inflation',
-  cftc_positioning: 'CFTC spec positioning',
+function LevelBox({ label, value, price, tone, hit }: {
+  label: string
+  value: number
+  price: number
+  tone: 'neutral' | 'red' | 'green'
+  hit?: boolean
+}) {
+  const color = tone === 'red' ? 'text-red-300' : tone === 'green' ? 'text-emerald-300' : 'text-neutral-100'
+  const distance = (value / price - 1) * 100
+  return (
+    <div
+      className={`min-w-0 rounded-lg border px-2 py-2 sm:px-3 ${
+        hit ? 'border-emerald-700/70 bg-emerald-950/30' : 'border-neutral-800 bg-neutral-950/60'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-1 text-[10px] uppercase tracking-wide text-neutral-400">
+        {label}
+        {hit && <span className="normal-case tracking-normal text-emerald-400">&#10003; hit</span>}
+      </div>
+      <div className={`mt-0.5 truncate font-mono text-[13px] tabular-nums sm:text-[15px] ${color}`}>{money(value)}</div>
+      <div className="font-mono text-[10px] text-neutral-400">{signed(distance)}%</div>
+    </div>
+  )
 }
 
-/** The requested 50/50 split: half this project's own model, half macro.
- *
- * Both halves are shown separately rather than only the blend, because when
- * they disagree that is the most useful thing on the card -- averaging it
- * into one number hides exactly the information a human wants.
- *
- * Two of the four factors carry zero weight. Measured 2026-09-04 on 2,196
- * daily bars: only real rates (54.4% at 21d) and the dollar (52.9% at 10d)
- * beat the +-2.1pt noise band. Breakevens and CFTC came in at or below a
- * coin flip, and equal-weighting all four scored 44.6% -- worse than the
- * best single factor. They stay visible as context but do not vote.
- */
-function MacroBlendPanel({ blend }: { blend: import('../lib/api').GoldBlend | null | undefined }) {
-  if (!blend) return null
-
-  const bar = (v: number) => {
-    const pct = Math.min(Math.abs(v), 1) * 50
-    const pos = v >= 0
+function SignalCard({ timeframe, board, livePrice, active, now, onSelect }: {
+  timeframe: Timeframe
+  board: Board
+  livePrice: number | null
+  active: boolean
+  now: number
+  onSelect: () => void
+}) {
+  const meta = TIMEFRAMES[timeframe]
+  const frame = `min-w-0 rounded-xl border p-4 text-left transition-colors sm:p-5 ${
+    active
+      ? 'border-amber-500/50 bg-neutral-900 ring-1 ring-amber-500/20'
+      : 'border-neutral-800 bg-neutral-900/50 hover:border-neutral-700'
+  }`
+  if (!board) {
     return (
-      <div className="relative h-1.5 w-full rounded-full bg-neutral-800 overflow-hidden">
-        <div className="absolute left-1/2 top-0 bottom-0 w-px bg-neutral-700" />
-        <div
-          className={`absolute top-0 bottom-0 rounded-full ${pos ? 'bg-emerald-500' : 'bg-red-500'}`}
-          style={pos ? { left: '50%', width: `${pct}%` } : { right: '50%', width: `${pct}%` }}
-        />
+      <div className={frame}>
+        <div className="text-[11px] uppercase tracking-[0.16em] text-neutral-500">{meta.label}</div>
+        <div className="mt-6 h-10 w-32 animate-pulse rounded bg-neutral-800" />
+        <div className="mt-6 h-16 animate-pulse rounded bg-neutral-800/60" />
       </div>
     )
   }
-  const num = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(3)}`
-
+  const c = board.consensus
+  const t = board.trade
+  // The current signal's trade already hit its target/stop: it is off the card, with
+  // its result shown until the next signal. ISO UTC strings compare in order.
+  const finished =
+    !t && c.direction !== 'NEUTRAL' && board.last_trade && board.last_trade.entry_time >= c.since
+      ? board.last_trade
+      : null
+  const price = livePrice ?? board.price
+  // Closed trades keep the P&L they closed at; open ones mark to the live price.
+  // The trade's own side: it can outlive (and differ from) the current signal.
+  const side = t?.side === 'SELL' ? -1 : 1
+  const open = t !== null && t.closed_time === null
+  const pnl = t ? (open ? side * (price / t.entry - 1) * 100 : t.pnl_pct) : 0
+  const rMultiple = t ? (open ? (side * (price - t.entry)) / Math.abs(t.entry - t.stop_loss) : t.r_multiple) : 0
+  const strength = Math.round(Math.min(1, Math.abs(c.score)) * 100)
   return (
-    <div className="mt-1 rounded-md border border-neutral-800 bg-neutral-950/50 p-2.5">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[10px] uppercase tracking-wider text-neutral-500">
-          Model {Math.round(blend.model_weight * 100)}% / Macro {Math.round(blend.factor_weight * 100)}%
-        </span>
-        <span
-          className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-            blend.sides_agree
-              ? 'bg-emerald-950 text-emerald-400 border border-emerald-900'
-              : 'bg-amber-950 text-amber-400 border border-amber-900'
-          }`}
-        >
-          {blend.sides_agree ? 'both agree' : 'halves disagree'}
-        </span>
-      </div>
-
-      <div className="space-y-2">
-        {[
-          { label: 'Model', value: blend.model_score },
-          { label: 'Macro', value: blend.factor_score },
-        ].map((row) => (
-          <div key={row.label} className="flex items-center gap-2">
-            <span className="w-12 shrink-0 text-[11px] text-neutral-400">{row.label}</span>
-            <div className="flex-1">{bar(row.value)}</div>
-            <span className="w-14 shrink-0 text-right font-mono text-[11px] text-neutral-400 tabular-nums">
-              {num(row.value)}
-            </span>
-          </div>
-        ))}
-        <div className="flex items-center gap-2 pt-1.5 border-t border-neutral-800/70">
-          <span className="w-12 shrink-0 text-[11px] font-medium text-neutral-300">Blend</span>
-          <div className="flex-1">{bar(blend.blended_score)}</div>
-          <span className="w-14 shrink-0 text-right font-mono text-[11px] text-neutral-100 tabular-nums">
-            {num(blend.blended_score)}
-          </span>
-        </div>
-      </div>
-
-      <div className="mt-2.5 pt-2 border-t border-neutral-800/70 space-y-1">
-        {blend.factors.map((f) => (
-          <div key={f.name} className="flex items-center justify-between text-[10px]" title={f.detail}>
-            <span className={f.contributes ? 'text-neutral-400' : 'text-neutral-600 italic'}>
-              {FACTOR_LABEL[f.name] ?? f.name}
-              {!f.contributes && ' (context only)'}
-            </span>
-            <span
-              className={`font-mono tabular-nums ${
-                !f.contributes
-                  ? 'text-neutral-600'
-                  : f.direction === 'bullish'
-                  ? 'text-emerald-400'
-                  : f.direction === 'bearish'
-                  ? 'text-red-400'
-                  : 'text-neutral-500'
-              }`}
-            >
-              {f.z_score == null ? 'n/a' : `z ${f.z_score >= 0 ? '+' : ''}${f.z_score.toFixed(2)}`}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-2 text-[10px] text-neutral-600 leading-relaxed">
-        Measured accuracy: real rates 54.4% (21d), dollar 52.9% (10d) against a 50% coin
-        flip with a &plusmn;2.1pt noise band. The other two scored at or below 50% and are
-        shown but not weighted.
-      </div>
-    </div>
-  )
-}
-
-function PredictionCard({
-  horizon,
-  prediction,
-  now,
-  crossAsset,
-  currentPrice,
-}: {
-  horizon: string
-  prediction: GoldPrediction | undefined
-  now: number
-  crossAsset: import('../lib/api').GoldCrossAsset | undefined
-  currentPrice: number | null
-}) {
-  const hasScore = prediction && prediction.score !== null
-  const tier = hasScore ? signalTier(prediction!.score as number) : null
-  const accuracy = prediction?.mean_directional_accuracy ?? null
-  const action = prediction?.action ?? 'HOLD'
-  const confirmation = cryptoConfirmation(action, crossAsset)
-  const risk = RISK_STYLE[prediction?.risk_level ?? 'very_high']
-
-  return (
-    <div className="rounded-md border border-neutral-800 p-4 flex flex-col gap-3">
-      <div className="flex items-start justify-between">
+    <button type="button" onClick={onSelect} aria-pressed={active} className={frame}>
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-medium text-neutral-200">{HORIZON_LABEL[horizon] ?? horizon}</div>
-          <div className="text-[11px] text-neutral-600">{HORIZON_HINT[horizon]}</div>
+          <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-neutral-300">{meta.label}</div>
+          <div className="text-[11px] text-neutral-400">{meta.sub}</div>
         </div>
-        <span className={`shrink-0 px-2.5 py-1 rounded-md text-xs font-bold tracking-wide ${ACTION_STYLE[action]}`}>
-          {action}
-        </span>
+        {t && (
+          <span className={`rounded-full border px-2.5 py-0.5 text-[10px] font-medium tracking-wide ${STATUS_STYLE[t.status]}`}>
+            {statusLabel(t.status)}
+          </span>
+        )}
       </div>
 
-      <div className="flex items-center gap-2">
-        <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${risk.className}`}>{risk.label}</span>
-        {prediction?.risk_reason && <span className="text-[11px] text-neutral-600">{prediction.risk_reason}</span>}
+      <div className="mt-3 flex items-end justify-between gap-4">
+        <div className={`text-4xl font-semibold tracking-tight ${DIRECTION_TEXT[c.direction]}`}>
+          {c.direction === 'NEUTRAL' ? 'WAIT' : c.direction}
+        </div>
+        {t && (
+          <div className="text-right">
+            <div className={`font-mono text-2xl tabular-nums ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {signed(pnl)}%
+            </div>
+            <div className="font-mono text-[11px] text-neutral-400">{signed(rMultiple)}R</div>
+          </div>
+        )}
       </div>
 
-      {!hasScore && <div className="text-neutral-700 font-mono text-sm">no model trained yet</div>}
+      <div className="mt-3 flex items-center gap-3">
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
+          <div className={`h-full rounded-full ${DIRECTION_BAR[c.direction]}`} style={{ width: `${strength}%` }} />
+        </div>
+        <span className="text-[11px] text-neutral-400">strength {strength}%</span>
+      </div>
 
-      {hasScore && tier && (
+      <div className="mt-3 text-[12px] text-neutral-400">
+        Signal <span className="font-mono text-neutral-200">{formatISTShort(c.since)}</span>
+        <span className="text-neutral-400"> · {ago(c.since, now)}</span>
+      </div>
+
+      {t ? (
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          <LevelBox label="Entry" value={t.entry} price={price} tone="neutral" />
+          <LevelBox label="Stop loss" value={t.stop_loss} price={price} tone="red" />
+          <LevelBox label="TP1" value={t.take_profit} price={price} tone="green" hit={t.status === 'TP HIT'} />
+        </div>
+      ) : (
         <>
-          <div className="flex items-center gap-2">
-            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${tier.badgeClass}`}>{tier.label}</span>
-            <span className="font-mono text-xs text-neutral-600">
-              {(prediction!.score as number) >= 0 ? '+' : ''}
-              {(prediction!.score as number).toFixed(3)}
-            </span>
-          </div>
-
-          {prediction!.target_price != null && (
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div>
-                <div className="text-neutral-600">Target price</div>
-                <div className="font-mono text-neutral-100 text-sm">
-                  ${prediction!.target_price!.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                </div>
-              </div>
-              <div>
-                <div className="text-neutral-600">Expected move</div>
-                <div className={`font-mono text-sm ${(prediction!.expected_move_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {(prediction!.expected_move_pct ?? 0) >= 0 ? '+' : ''}
-                  {(prediction!.expected_move_pct ?? 0).toFixed(2)}%
-                </div>
-              </div>
+          {finished && (
+            <div className={`mt-4 rounded-lg border px-3 py-2 text-[12px] ${RESULT_STYLE[finished.result ?? 'SL'].cls}`}>
+              This signal&rsquo;s trade is closed &mdash; {RESULT_STYLE[finished.result ?? 'SL'].label} at{' '}
+              <span className="font-mono">{money(finished.exit_price ?? 0)}</span>{' '}
+              <span className="font-mono">({signed(finished.pnl_pct)}%)</span>, {formatISTShort(finished.exit_time)}.
+              {!board.plan && <span className="block text-neutral-400">Waiting for the next signal.</span>}
             </div>
           )}
-
-          <MacroBlendPanel blend={prediction!.blend} />
-
-          <LevelsPanel
-            levels={prediction!.levels}
-            action={action}
-            price={currentPrice}
-          />
-
-          <div className="text-[11px] text-neutral-600">
-            valid until <span className="text-neutral-400">{countdownLabel(prediction!.valid_until, now)}</span>
-          </div>
-
-          {confirmation && (
-            <div
-              className={`text-[11px] ${
-                confirmation.agree > confirmation.disagree
-                  ? 'text-emerald-400'
-                  : confirmation.disagree > confirmation.agree
-                  ? 'text-red-400'
-                  : 'text-neutral-500'
-              }`}
-            >
-              crypto right now: {confirmation.agree}/{confirmation.total} confirming this call
-              {confirmation.disagree > 0 && `, ${confirmation.disagree} against`}
-            </div>
+          {board.plan && (
+            <>
+              <div className="mt-4 grid grid-cols-3 gap-2">
+                <LevelBox label="Entry" value={board.plan.entry} price={price} tone="neutral" />
+                <LevelBox label="Stop loss" value={board.plan.stop_loss} price={price} tone="red" />
+                <LevelBox label="TP1" value={board.plan.take_profit} price={price} tone="green" />
+              </div>
+              <div className="mt-2 text-[11px] text-neutral-400">
+                {board.plan.side} signal active, no open trade &mdash; levels for a trade entered now.
+              </div>
+            </>
           )}
-
-          {!prediction!.decidable && (
-            <div className="text-[11px] text-neutral-600 italic">abstaining -- not confident enough to call</div>
-          )}
-          {accuracy != null && (
-            <div className="text-[11px] text-neutral-600">
-              walk-forward accuracy: {(accuracy * 100).toFixed(1)}%
-              {prediction?.n_samples != null && ` (n=${prediction.n_samples})`}
+          {board.triggers && (
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <LevelBox label="Buy above" value={board.triggers.buy_above} price={price} tone="green" />
+              <LevelBox label="Sell below" value={board.triggers.sell_below} price={price} tone="red" />
             </div>
           )}
         </>
       )}
+    </button>
+  )
+}
+
+function LevelLadder({ board, price }: { board: SignalBoard; price: number }) {
+  // Levels from different sources that land on the same price read as one.
+  const merged: { price: number; labels: string[]; kind: string }[] = []
+  for (const lv of board.levels) {
+    const prev = merged[merged.length - 1]
+    if (prev && Math.abs(prev.price / lv.price - 1) < 0.0005) prev.labels.push(lv.label)
+    else merged.push({ price: lv.price, labels: [lv.label], kind: lv.price > price ? 'resistance' : 'support' })
+  }
+  const above = merged.filter((l) => l.kind === 'resistance').slice(-6)
+  const below = merged.filter((l) => l.kind === 'support').slice(0, 6)
+  const row = (l: (typeof merged)[number], tone: string) => (
+    <div key={l.price} className="flex items-baseline justify-between gap-3 py-1.5">
+      <span className="min-w-0 truncate text-[12px] text-neutral-400" title={l.labels.join(' · ')}>
+        {l.labels.join(' · ')}
+      </span>
+      <span className="shrink-0 text-right">
+        <span className={`font-mono text-[13px] tabular-nums ${tone}`}>{money(l.price)}</span>
+        <span className="ml-2 inline-block w-14 font-mono text-[10px] text-neutral-400">
+          {signed((l.price / price - 1) * 100)}%
+        </span>
+      </span>
+    </div>
+  )
+  return (
+    <div>
+      <div className="mb-1 text-[10px] uppercase tracking-[0.16em] text-red-400/70">Resistance</div>
+      <div className="divide-y divide-neutral-800/60">{above.map((l) => row(l, 'text-red-300'))}</div>
+      <div className="my-2 flex items-center justify-between rounded-md border border-amber-800/60 bg-amber-950/30 px-2.5 py-1.5">
+        <span className="text-[11px] uppercase tracking-[0.14em] text-amber-300">Price</span>
+        <span className="font-mono text-[13px] text-amber-200">{money(price)}</span>
+      </div>
+      <div className="divide-y divide-neutral-800/60">{below.map((l) => row(l, 'text-emerald-300'))}</div>
+      <div className="mt-1 text-[10px] uppercase tracking-[0.16em] text-emerald-400/70">Support</div>
     </div>
   )
 }
 
-const SEASONALITY_STYLE: Record<string, string> = {
-  positive: 'text-emerald-400',
-  negative: 'text-red-400',
-  neutral: 'text-neutral-400',
+const SUMMARY_TONE: Record<string, string> = {
+  'Strong Buy': 'text-emerald-300',
+  Buy: 'text-emerald-400',
+  Neutral: 'text-neutral-300',
+  Sell: 'text-red-400',
+  'Strong Sell': 'text-red-300',
 }
+const FAMILY_NAME: Record<string, string> = { Trend: 'Trend', Oscillator: 'Oscillators', Gann: 'Gann' }
 
-function EventsPanel({ events }: { events: import('../lib/api').GoldEvents | undefined }) {
-  if (!events) return null
-  const { seasonality, gold_buying_tithis, next_macro_event } = events
-
+function SummaryTiles({ board, daily }: { board: SignalBoard; daily: Board }) {
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
-      <div className="text-sm font-medium text-neutral-300 mb-3">Calendar & Events</div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {next_macro_event.event && (
-          <div className="rounded-md border border-amber-900/50 bg-amber-950/20 p-3">
-            <div className="text-xs font-medium text-neutral-400 mb-1">Next US Macro Event</div>
-            <div className="text-sm font-semibold text-amber-400">
-              {next_macro_event.event} in {formatHoursAway(next_macro_event.hours_away)}
-            </div>
-            <div className="text-[11px] text-neutral-600 mt-1">{MACRO_EVENT_HINT[next_macro_event.event]}</div>
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      {board.families.map((f) => (
+        <div key={f.family} className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+          <div className="text-[10px] uppercase tracking-[0.16em] text-neutral-500">{FAMILY_NAME[f.family] ?? f.family}</div>
+          <div className={`mt-1 text-lg font-semibold ${SUMMARY_TONE[f.label]}`}>{f.label}</div>
+          <div className="relative mt-2 h-1 rounded-full bg-neutral-800">
+            <div className="absolute inset-y-0 left-1/2 w-px bg-neutral-600" />
+            <div
+              className={`absolute inset-y-0 rounded-full ${f.score >= 0 ? 'bg-emerald-500' : 'bg-red-500'}`}
+              style={f.score >= 0 ? { left: '50%', width: `${f.score * 50}%` } : { right: '50%', width: `${-f.score * 50}%` }}
+            />
           </div>
-        )}
-        <div className="rounded-md border border-neutral-800 p-3">
-          <div className="text-xs font-medium text-neutral-400 mb-1">This Month's Documented Seasonality</div>
-          <div className={`text-sm font-semibold ${SEASONALITY_STYLE[seasonality.effect]}`}>
-            {seasonality.month}: {seasonality.effect}
-          </div>
-          <div className="text-[11px] text-neutral-600 mt-1">{seasonality.note}</div>
-          <div className="text-[10px] text-neutral-700 mt-2 italic">{seasonality.source}</div>
         </div>
-        {(['shukla_tritiya', 'krishna_trayodashi'] as const).map((key) => {
-          const t = gold_buying_tithis[key]
-          return (
-            <div key={key} className="rounded-md border border-neutral-800 p-3">
-              <div className="text-xs font-medium text-neutral-400 mb-1">{t.label}</div>
-              <div className="text-sm font-semibold text-amber-400">{formatDaysAway(t.days_away)}</div>
-              <div className="text-[11px] text-neutral-600 mt-1">{t.date ?? '--'}</div>
-            </div>
-          )
-        })}
+      ))}
+      <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+        <div className="text-[10px] uppercase tracking-[0.16em] text-neutral-500">Gann dates</div>
+        {(daily?.gann.time_cycles ?? []).slice(0, 3).map((c) => (
+          <div key={`${c.from}${c.bars}`} className="mt-1 flex items-baseline justify-between gap-2 text-[12px]">
+            <span className="font-mono text-neutral-200">
+              {new Date(c.due).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', timeZone: 'Asia/Kolkata' })}
+            </span>
+            <span className="text-neutral-500">
+              {c.bars}d from {c.from === 'top' ? 'high' : 'low'}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   )
 }
 
-const CORRELATION_LABEL: Record<string, { label: string; className: string }> = {
-  moving_with: { label: 'Moving WITH gold', className: 'text-emerald-400' },
-  loosely_with: { label: 'Loosely with gold', className: 'text-emerald-500/70' },
-  decoupled: { label: 'Decoupled', className: 'text-neutral-500' },
-  loosely_against: { label: 'Loosely against gold', className: 'text-red-500/70' },
-  moving_against: { label: 'Moving AGAINST gold', className: 'text-red-400' },
-  unknown: { label: 'Unknown', className: 'text-neutral-600' },
+// The board reports bar CLOSE times; the chart is keyed by bar OPEN times.
+function barOpen(iso: string, barSeconds: number): number {
+  return Math.round(new Date(iso).getTime() / 1000) - barSeconds
 }
 
-function CrossAssetPanel({ crossAsset }: { crossAsset: import('../lib/api').GoldCrossAsset | undefined }) {
-  if (!crossAsset?.ready) return null
+function tradeLines(board: Board, barSeconds: number): PriceLine[] {
+  if (!board) return []
+  const t = board.trade
+  if (t) {
+    const from = barOpen(t.entry_time, barSeconds)
+    return [
+      { price: t.entry, color: '#a3a3a3', title: 'Entry', dashed: true, from },
+      { price: t.stop_loss, color: '#f87171', title: 'SL', from },
+      { price: t.take_profit, color: '#34d399', title: 'TP1', from },
+    ]
+  }
+  if (board.plan) {
+    const from = barOpen(board.bar_close_time, barSeconds)
+    return [
+      { price: board.plan.entry, color: '#a3a3a3', title: 'Entry', dashed: true, from },
+      { price: board.plan.stop_loss, color: '#f87171', title: 'SL', dashed: true, from },
+      { price: board.plan.take_profit, color: '#34d399', title: 'TP1', dashed: true, from },
+    ]
+  }
+  if (board.triggers) {
+    // Breakout levels are the last 20 bars' range, so they start 20 bars back.
+    const from = barOpen(board.bar_close_time, barSeconds) - 20 * barSeconds
+    return [
+      { price: board.triggers.buy_above, color: '#34d399', title: 'Buy above', dashed: true, from },
+      { price: board.triggers.sell_below, color: '#f87171', title: 'Sell below', dashed: true, from },
+    ]
+  }
+  return []
+}
 
+// Entry arrows and exit dots for the open trade and recent closed ones. The
+// chart drops any that fall outside its visible candles.
+function tradeMarkers(board: Board, barSeconds: number): ChartMarker[] {
+  if (!board) return []
+  const trades = [...(board.trade ? [board.trade] : []), ...board.history.slice(0, 40)]
+  const out: ChartMarker[] = []
+  for (const t of trades) {
+    const long = t.side === 'BUY'
+    out.push({
+      time: barOpen(t.entry_time, barSeconds),
+      position: long ? 'belowBar' : 'aboveBar',
+      shape: long ? 'arrowUp' : 'arrowDown',
+      color: long ? '#34d399' : '#f87171',
+      text: t.open ? t.side : '',
+    })
+    if (!t.open && t.exit_time && t.result) {
+      const style = RESULT_STYLE[t.result]
+      const lossSide = t.pnl_pct < 0
+      out.push({
+        time: barOpen(t.exit_time, barSeconds),
+        position: long === lossSide ? 'belowBar' : 'aboveBar',
+        shape: 'circle',
+        color: style.marker,
+        text: t.result === 'TP' ? 'TP1' : t.result,
+      })
+    }
+  }
+  return out
+}
+
+function tradeTime(iso: string | null, daily: boolean): string {
+  if (!iso) return '--'
+  const opts: Intl.DateTimeFormatOptions = daily
+    ? { day: '2-digit', month: 'short', year: '2-digit', timeZone: 'Asia/Kolkata' }
+    : { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' }
+  return new Date(iso).toLocaleString('en-IN', opts)
+}
+
+function TradeRow({ t, daily }: { t: GoldTrade; daily: boolean }) {
+  const style = t.result ? RESULT_STYLE[t.result] : null
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
-      <div className="text-sm font-medium text-neutral-300 mb-1">Crypto Correlation</div>
-      <div className="text-xs text-neutral-600 mb-4">
-        Rolling {crossAsset.window_bars}-bar ({crossAsset.resolution}) correlation with BTC/ETH/SOL -- a real, strongly
-        significant SAME-INSTANT relationship (researched 2026-08-22: both react to shared risk-sentiment/liquidity
-        conditions), but with ZERO exploitable lead time in either direction. Context for reading the current move, not
-        a forecasting input -- never fed to the prediction models above.
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        {Object.entries(crossAsset.assets).map(([symbol, asset]) => {
-          const style = CORRELATION_LABEL[asset.interpretation] ?? CORRELATION_LABEL.unknown
-          return (
-            <div key={symbol} className="rounded-md border border-neutral-800 p-3">
-              <div className="text-xs font-medium text-neutral-400 mb-1">{symbol}</div>
-              <div className={`text-sm font-semibold ${style.className}`}>{style.label}</div>
-              <div className="text-[11px] text-neutral-600 mt-1 font-mono">
-                r = {asset.correlation != null ? asset.correlation.toFixed(2) : '--'}
-              </div>
+    <tr className={`border-b border-neutral-900 ${t.open ? 'bg-sky-950/20' : ''}`}>
+      <td className="py-1.5 pr-3 font-mono text-neutral-400">{tradeTime(t.entry_time, daily)}</td>
+      <td className={`py-1.5 pr-3 font-medium ${t.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{t.side}</td>
+      <td className="py-1.5 pr-3 font-mono text-neutral-200">{money(t.entry)}</td>
+      <td className="py-1.5 pr-3 font-mono text-red-300/80">{money(t.stop_loss)}</td>
+      <td className="py-1.5 pr-3 font-mono text-emerald-300/80">{money(t.take_profit)}</td>
+      <td className="py-1.5 pr-3 font-mono text-neutral-400">{t.open ? 'open' : tradeTime(t.exit_time, daily)}</td>
+      <td className="py-1.5 pr-3 font-mono text-neutral-200">{t.exit_price !== null ? money(t.exit_price) : '--'}</td>
+      <td className="py-1.5 pr-3">
+        {t.open ? (
+          <span className={`rounded-full border px-2 py-0.5 text-[10px] ${STATUS_STYLE[t.status]}`}>{statusLabel(t.status)}</span>
+        ) : (
+          style && <span className={`rounded-full border px-2 py-0.5 text-[10px] ${style.cls}`}>{style.label}</span>
+        )}
+      </td>
+      <td className={`py-1.5 text-right font-mono ${t.pnl_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+        {signed(t.pnl_pct)}%
+      </td>
+    </tr>
+  )
+}
+
+function TradeLog({ title, sub, board, daily }: { title: string; sub: string; board: Board; daily: boolean }) {
+  const st = board?.history_stats
+  return (
+    <Panel title={title} right={<span className="text-[11px] text-neutral-400">{sub}</span>}>
+      {!board ? (
+        <div className="h-48 animate-pulse rounded bg-neutral-800/50" />
+      ) : (
+        <>
+          {st && st.trades > 0 && (
+            <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-neutral-400">
+              <span>
+                <span className="text-neutral-200">{st.trades}</span> closed trades since {tradeTime(st.since ?? null, true)}
+              </span>
+              <span className="text-emerald-400">{st.tp} TP1</span>
+              <span className="text-red-400">{st.sl} SL</span>
+              <span>win {Math.round((st.win_rate ?? 0) * 100)}%</span>
+              <span className={(st.net_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                net {signed(st.net_pct ?? 0)}%
+              </span>
             </div>
-          )
-        })}
-      </div>
-    </div>
+          )}
+          <div className="max-h-96 overflow-auto">
+            <table className="w-full min-w-[760px] text-[12px]">
+              <thead className="sticky top-0 bg-neutral-950">
+                <tr className="border-b border-neutral-800 text-left text-[11px] uppercase tracking-wider text-neutral-400">
+                  <th className="py-2 pr-3 font-medium">Entry time</th>
+                  <th className="py-2 pr-3 font-medium">Side</th>
+                  <th className="py-2 pr-3 font-medium">Entry</th>
+                  <th className="py-2 pr-3 font-medium">SL</th>
+                  <th className="py-2 pr-3 font-medium">TP1</th>
+                  <th className="py-2 pr-3 font-medium">Exit time</th>
+                  <th className="py-2 pr-3 font-medium">Exit</th>
+                  <th className="py-2 pr-3 font-medium">Result</th>
+                  <th className="py-2 text-right font-medium">P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {board.trade && <TradeRow t={board.trade} daily={daily} />}
+                {board.history.map((t) => (
+                  <TradeRow key={t.entry_time} t={t} daily={daily} />
+                ))}
+                {!board.trade && board.history.length === 0 && (
+                  <tr>
+                    <td colSpan={9} className="py-6 text-center text-neutral-400">No trades yet</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </Panel>
+  )
+}
+
+// ------------------------------------------------------------------ page
+
+// The same AI Analyst the crypto Dashboard runs, on gold (Delta XAUTUSD):
+// trend, momentum, chart patterns, Gann, levels, the dollar, real yields and the
+// event calendar -- every 5 minutes, paper trades with the same dynamic exits.
+function GoldAnalyst() {
+  const q = useQuery({ queryKey: ['analyst_gold'], queryFn: api.analystGold, refetchInterval: 60_000 })
+  const d = q.data
+  const st = d?.stats
+  return (
+    <Panel
+      title="AI Analyst · gold"
+      right={<span className="text-[11px] text-neutral-400">every 5 min · paper · updated {d?.updated ? formatISTShort(d.updated) : '--'}</span>}
+    >
+      {q.isError && !d ? (
+        <ErrorState what="the gold Analyst" error={q.error} onRetry={() => q.refetch()} />
+      ) : !d ? (
+        <div className="h-40 animate-pulse rounded bg-neutral-800/50" />
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)]">
+          {d.analysis ? (
+            <CoinCard a={d.analysis} best={d.analysis.decision !== 'WAIT'} />
+          ) : (
+            <div className="text-sm text-neutral-300">The first gold analysis runs a few minutes after the server starts.</div>
+          )}
+          <div className="space-y-3">
+            {st && (
+              <div className="flex flex-wrap gap-x-5 gap-y-1 text-[12px] text-neutral-400">
+                <span>
+                  <span className="text-neutral-200">{st.closed}</span> closed
+                </span>
+                <span>win {st.win_rate != null ? `${Math.round(st.win_rate * 100)}%` : '--'}</span>
+                <span>avg {st.avg_r != null ? `${st.avg_r >= 0 ? '+' : ''}${st.avg_r.toFixed(2)}R` : '--'}</span>
+                <span className={st.total_r >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                  total {st.total_r >= 0 ? '+' : ''}
+                  {st.total_r.toFixed(2)}R
+                </span>
+              </div>
+            )}
+            <TradeTable rows={d.open_trades} open />
+            {d.closed_trades.length > 0 && <TradeTable rows={d.closed_trades.slice(0, 10)} open={false} />}
+          </div>
+        </div>
+      )}
+    </Panel>
   )
 }
 
 export default function Gold() {
-  const now = useNowTick(1000)
-  const snapshotQuery = useQuery({
-    queryKey: ['gold_snapshot'],
-    queryFn: api.goldSnapshot,
-    refetchInterval: 30_000,
-  })
-  const candlesQuery = useQuery({
-    queryKey: ['gold_candles'],
-    queryFn: () => api.goldCandles('15m', 300),
+  const now = useNow(30_000)
+  const [timeframe, setTimeframe] = useState<Timeframe>('daily')
+
+  const boards = useQuery({ queryKey: ['gold_signal_board'], queryFn: api.goldSignalBoard, refetchInterval: 60_000 })
+  const snapshot = useQuery({ queryKey: ['gold_snapshot'], queryFn: api.goldSnapshot, refetchInterval: 30_000 })
+  const meta = TIMEFRAMES[timeframe]
+  const candles = useQuery({
+    queryKey: ['gold_candles', meta.resolution],
+    queryFn: () => api.goldCandles(meta.resolution, meta.candles),
     refetchInterval: 60_000,
   })
 
-  const snapshot = snapshotQuery.data
-  const regime = REGIME_LABEL[snapshot?.regime ?? 'unknown']
-  const priceFlash = useFlashOnChange(snapshot?.price ?? null)
+  const board = boards.data?.[timeframe] ?? null
+  const lines = useMemo(() => tradeLines(board, meta.barSeconds), [board, meta.barSeconds])
+  const markers = useMemo(() => tradeMarkers(board, meta.barSeconds), [board, meta.barSeconds])
+  const price = snapshot.data?.price ?? boards.data?.hourly?.price ?? null
+  const isPhone = useIsPhone()
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      <style>{`
-        @keyframes gold-scan-move { 0% { left: -33%; } 100% { left: 100%; } }
-        .gold-scan { animation: gold-scan-move 2.6s linear infinite; }
-        @keyframes gold-flash { 0% { color: #fbbf24; } 100% { color: inherit; } }
-        .gold-flash { animation: gold-flash 700ms ease-out; }
-      `}</style>
+    <div className="mx-auto max-w-6xl space-y-4">
+      <Header
+        price={price}
+        change={boards.data?.hourly?.change_24h_pct ?? null}
+        asOf={snapshot.data?.as_of ?? boards.data?.hourly?.bar_close_time}
+        now={now}
+        event={snapshot.data?.events?.next_macro_event}
+      />
 
-      <div className="rounded-lg border border-neutral-800 bg-gradient-to-b from-neutral-900 to-neutral-900/60 p-4">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
-              </span>
-              <div className="text-sm font-medium text-neutral-200">Gold Research Engine</div>
-              <span className="text-[10px] text-neutral-600 uppercase tracking-wider">PAXG / Paxos Gold</span>
-            </div>
-            <div className="text-xs text-neutral-600 mt-1 max-w-xl">
-              Standalone research page -- NOT paper-traded, no positions or PnL. A dedicated feature bank (technicals,
-              Fibonacci/regression channels, financial astrology) and 3 independently-trained horizon models, entirely
-              separate from the crypto strategies.
-            </div>
-          </div>
-          <div className="text-right">
-            <div className={`font-mono text-3xl text-neutral-100 tabular-nums ${priceFlash ? 'gold-flash' : ''}`}>
-              {snapshot?.price != null ? `$${snapshot.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '--'}
-            </div>
-            <div className="text-xs text-neutral-600">{secondsAgoLabel(snapshot?.as_of, now)}</div>
-          </div>
+      {boards.isError && (
+        <div className="rounded-xl border border-red-900/60 bg-red-950/30 p-4 text-sm text-red-300">
+          Signals are unavailable right now. {String(boards.error).slice(0, 160)}
         </div>
+      )}
 
-        <div className="mt-3">
-          <EngineScanBar />
-        </div>
-
-        <div className="mt-3 flex items-center gap-2">
-          <span className="text-xs text-neutral-500">Regime:</span>
-          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${regime.className}`}>{regime.label}</span>
-        </div>
+      <div className="grid gap-4 md:grid-cols-2">
+        {(['hourly', 'daily'] as const).map((tf) => (
+          <SignalCard
+            key={tf}
+            timeframe={tf}
+            board={boards.isLoading ? undefined : boards.data?.[tf]}
+            livePrice={price}
+            active={timeframe === tf}
+            now={now}
+            onSelect={() => setTimeframe(tf)}
+          />
+        ))}
       </div>
 
-      {!snapshot?.ready && (
-        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6 text-center text-neutral-600 text-sm">
-          Waiting for gold data to backfill and the first research tick to run (every ~3 minutes)...
-        </div>
-      )}
+      <GoldAnalyst />
 
-      {snapshot?.ready && (
-        <>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {HORIZON_ORDER.map((horizon) => (
-              <PredictionCard
-                key={horizon}
-                horizon={horizon}
-                prediction={snapshot.predictions[horizon]}
-                now={now}
-                crossAsset={snapshot.cross_asset}
-                currentPrice={snapshot.price ?? null}
-              />
-            ))}
-          </div>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <Panel
+          title={`${meta.label} chart`}
+          right={
+            <div className="flex gap-3 text-[11px] text-neutral-400">
+              <span>
+                <span className="text-neutral-400">- -</span> entry
+              </span>
+              <span>
+                <span className="text-red-400">&mdash;</span> stop
+              </span>
+              <span>
+                <span className="text-emerald-400">&mdash;</span> targets
+              </span>
+            </div>
+          }
+        >
+          {candles.isError ? (
+            <ErrorState what="gold candles" error={candles.error} onRetry={() => candles.refetch()} />
+          ) : (
+            <CandleChart candles={candles.data ?? []} lines={lines} markers={markers} height={isPhone ? 300 : 420} />
+          )}
+        </Panel>
+        <Panel title="Key levels">
+          {boards.isError ? (
+            <div className="text-sm text-neutral-400">Levels are unavailable while signals are down.</div>
+          ) : board ? (
+            <LevelLadder board={board} price={price ?? board.price} />
+          ) : boards.isLoading ? (
+            <div className="h-80 animate-pulse rounded bg-neutral-800/50" />
+          ) : (
+            <div className="text-sm text-neutral-400">No {meta.label.toLowerCase()} levels yet.</div>
+          )}
+        </Panel>
+      </div>
 
-          <EventsPanel events={snapshot.events} />
-          <CrossAssetPanel crossAsset={snapshot.cross_asset} />
+      {/* Stacked, not side by side: each log needs the full width for its ten
+          columns, or the exit / result / P&L -- the part people read -- scroll away. */}
+      <div className="grid gap-4">
+        <TradeLog title="Short-term trades" sub="1H signals · hours" board={boards.data?.hourly} daily={false} />
+        <TradeLog title="Long-term trades" sub="1D signals · days" board={boards.data?.daily} daily />
+      </div>
 
-          <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
-            <div className="text-sm font-medium text-neutral-300 mb-3">Price (15m)</div>
-            <CandleChart candles={candlesQuery.data ?? []} />
-          </div>
+      {board && <SummaryTiles board={board} daily={boards.data?.daily} />}
 
-          <DeepAnalysisEngine indicators={snapshot.indicators} />
-        </>
-      )}
+      <p className="pb-2 text-center text-[11px] text-neutral-400">
+        Research signals for information only &mdash; not financial advice.
+      </p>
     </div>
   )
 }

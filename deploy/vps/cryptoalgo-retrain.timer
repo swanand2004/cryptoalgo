@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the cryptoalgo model retrain nightly at 03:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+# Catch up on the next boot if the server was off at 03:00.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

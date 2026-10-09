@@ -41,6 +41,13 @@ class PaperBroker(Broker):
         self.registry = registry
         self.cache = cache
         self.settings = settings or get_settings()
+        # Conviction of each resting limit order, so its eventual fill picks
+        # the same leverage tier a market fill would have (order rows have no
+        # column for it). Lost on restart -> that fill uses the floor tier.
+        self._resting_quality: dict[int, float] = {}
+        # Explicit leverage a resting order was placed with (OrderRequest.
+        # leverage, e.g. the book's margin leverage) -- wins over the tier.
+        self._resting_leverage: dict[int, float] = {}
 
     async def _get_balance(self) -> float:
         # Standalone read (own session) -- safe to use outside an open transaction.
@@ -104,13 +111,22 @@ class PaperBroker(Broker):
             fee = 0.0
             realized_pnl = 0.0
             if will_fill_now:
-                leverage = select_leverage(req.quality, self.settings.min_leverage, self.settings.max_leverage)
+                # The order's own leverage when the caller chose one (the
+                # book's margin leverage), exactly as LiveBroker stamps it on
+                # Delta -- otherwise the conviction tier, as before.
+                leverage = req.leverage or select_leverage(
+                    req.quality, self.settings.min_leverage, self.settings.max_leverage
+                )
                 fee, realized_pnl = await self._apply_fill(
                     session, order, price, fee_rate, atr=req.atr, exit_reason=exit_reason, leverage=leverage
                 )
 
             await session.commit()
             await session.refresh(order)
+            if not will_fill_now:
+                self._resting_quality[order.id] = req.quality
+                if req.leverage:
+                    self._resting_leverage[order.id] = req.leverage
             return OrderResult(
                 order_id=order.id,
                 broker_order_id=None,
@@ -302,11 +318,16 @@ class PaperBroker(Broker):
             if order and order.state == "open":
                 order.state = "cancelled"
                 await session.commit()
+        self._resting_quality.pop(order_id, None)
+        self._resting_leverage.pop(order_id, None)
 
-    async def check_resting_orders(self) -> None:
+    async def check_resting_orders(self) -> float:
         """Scans open paper limit orders and fills any that the market has
-        traded through since they were placed. Call this periodically.
+        traded through since they were placed. Returns the total realized PnL
+        of those fills (OrderManager.process_resting_fills forwards it to the
+        daily-loss kill switch). Call this periodically.
         """
+        realized_total = 0.0
         async with SessionLocal() as session:
             result = await session.execute(
                 select(Order).where(Order.mode == "paper", Order.state == "open")
@@ -324,8 +345,17 @@ class PaperBroker(Broker):
                 product = self.registry.get(order.symbol)
                 order.state = "closed"
                 order.unfilled_size = 0
-                await self._apply_fill(session, order, order.limit_price, product.maker_commission_rate)
+                quality = self._resting_quality.pop(order.id, None)
+                leverage = self._resting_leverage.pop(order.id, None) or (
+                    select_leverage(quality, self.settings.min_leverage, self.settings.max_leverage)
+                    if quality is not None else None
+                )
+                _, realized = await self._apply_fill(
+                    session, order, order.limit_price, product.maker_commission_rate, leverage=leverage
+                )
+                realized_total += realized
             await session.commit()
+        return realized_total
 
     async def get_cash_balance(self) -> float:
         return await self._get_balance()
@@ -387,6 +417,27 @@ class PaperBroker(Broker):
                 select(Position).where(Position.mode == "paper", Position.size != 0)
             )
             open_positions = result.scalars().all()
+
+            # Brackets disabled: clear whatever levels are still stored rather
+            # than leaving them to fire. Positions opened BEFORE the setting
+            # was turned off would otherwise keep stopping out on levels the
+            # system no longer intends to honour -- see
+            # Settings.atr_brackets_enabled, where enabling them is measured at
+            # -100% against +968% on signal exits alone.
+            if not self.settings.atr_brackets_enabled:
+                cleared = 0
+                for pos in open_positions:
+                    if pos.stop_loss_price is None and pos.take_profit_price is None:
+                        continue
+                    pos.stop_loss_price = None
+                    pos.take_profit_price = None
+                    pos.peak_price = None
+                    pos.stop_distance = None
+                    cleared += 1
+                if cleared:
+                    await session.commit()
+                    logger.info("Cleared stale ATR brackets on %d position(s)", cleared)
+                return
 
             for pos in open_positions:
                 if pos.stop_loss_price is None and pos.take_profit_price is None:

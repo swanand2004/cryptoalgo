@@ -38,7 +38,7 @@ async def is_kill_switch_on() -> bool:
     return (await get_state("kill_switch", "off")) == "on"
 
 
-async def set_kill_switch(on: bool) -> None:
+async def set_kill_switch(on: bool, reason: str = "manual (dashboard)") -> None:
     await set_state("kill_switch", "on" if on else "off")
     if on:
         # Records the calendar day (UTC) the switch was most recently
@@ -48,3 +48,9 @@ async def set_kill_switch(on: bool) -> None:
         # and never reset" (stale, should be cleared) without needing its
         # own separate bookkeeping of when it last checked.
         await set_state("kill_switch_engaged_day", dt.datetime.now(dt.timezone.utc).date().isoformat())
+        # Owner alert (Telegram, off unless configured): every halt passes
+        # through here -- the dashboard button and all three risk supervisors.
+        # Fire-and-forget; it can never raise or delay the halt.
+        from app.notify.telegram import kill_switch_on
+
+        kill_switch_on(reason)

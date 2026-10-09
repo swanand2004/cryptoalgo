@@ -1,0 +1,24 @@
+# Trading bot + dashboard. Installed to /etc/systemd/system/ on the VPS.
+[Unit]
+Description=cryptoalgo trading bot and dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cryptoalgo
+WorkingDirectory=/opt/cryptoalgo/backend
+# Real env vars win over backend/.env (pydantic-settings), so the database
+# location cannot be overridden by a stale .env copied from the laptop.
+Environment=DATABASE_URL=sqlite+aiosqlite:////opt/cryptoalgo/data/live.db
+Environment=FRONTEND_DIST=/opt/cryptoalgo/frontend/dist
+Environment=PYTHONUNBUFFERED=1
+# Loopback only: the public path is the tunnel, never a raw port.
+ExecStart=/opt/cryptoalgo/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+Restart=always
+RestartSec=10
+# The app writes its own rotating app.log; keep only errors in the journal.
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -48,7 +48,7 @@ class OrderManager:
     async def get_equity(self) -> float:
         return await (await self.current_broker()).get_equity()
 
-    async def submit(self, req: OrderRequest) -> OrderResult:
+    async def submit(self, req: OrderRequest, *, post_only: bool = False) -> OrderResult:
         broker = await self.current_broker()
         equity = await broker.get_equity()
 
@@ -57,7 +57,7 @@ class OrderManager:
             logger.warning("Order blocked by risk manager: %s (%s)", reason, req)
             return OrderResult(0, None, "rejected", 0, None, 0.0, reason=reason)
 
-        if not req.reduce_only:
+        if not req.reduce_only and not req.min_lot:
             positions = await broker.get_positions()
 
             # Hard cap on concurrent open positions, account-wide. Only a
@@ -96,6 +96,7 @@ class OrderManager:
                     current_notional,
                     current_margin,
                     quality=req.quality,
+                    leverage=req.leverage,
                 )
                 if abs(capped) < abs(signed):
                     logger.info("Order size capped by risk limits: %d -> %d for %s", signed, capped, req.symbol)
@@ -104,7 +105,12 @@ class OrderManager:
         if req.size == 0:
             return OrderResult(0, None, "rejected", 0, None, 0.0, reason="size reduced to 0 by risk limits")
 
-        result = await broker.place_order(req)
+        if post_only and broker.mode == "live":
+            # Maker limit orders only (maker.py). Paper never crosses at the
+            # touch it is given, so it needs no flag.
+            result = await broker.place_order(req, post_only=True)
+        else:
+            result = await broker.place_order(req)
         if result.realized_pnl != 0.0:
             # Feeds the daily-loss kill switch -- without this it never sees
             # a single real loss and can never trip, regardless of how much
@@ -112,28 +118,94 @@ class OrderManager:
             await self.risk_manager.record_realized_pnl(result.realized_pnl)
         return result
 
-    async def flatten_all(self, mode_override: str | None = None) -> None:
-        """Kill-switch action: reduce every open position to zero at market."""
+    async def cancel(self, order_id: int):
+        """Live returns False when the order vanished with an unknown final
+        state (it may have filled); paper returns None."""
+        return await (await self.current_broker()).cancel_order(order_id)
+
+    async def cancel_open_orders(self, broker, symbol: str | None = None, strategy: str | None = None) -> list[int]:
+        """Cancels resting orders (all, or one symbol/strategy's). Forced exits
+        call this FIRST: a maker order left resting would otherwise fill after
+        the flatten and quietly reopen the position the kill switch just closed.
+
+        A cancel that fails is logged and SKIPPED, never raised: the forced
+        exit that follows must happen regardless. Returns the ids that failed."""
+        from sqlalchemy import select
+
+        from app.data.db import SessionLocal
+        from app.data.models import Order
+        from app.execution.maker import resting_clause
+
+        async with SessionLocal() as session:
+            stmt = select(Order.id).where(Order.mode == broker.mode, resting_clause())
+            if symbol is not None:
+                stmt = stmt.where(Order.symbol == symbol)
+            if strategy is not None:
+                stmt = stmt.where(Order.strategy == strategy)
+            ids = list((await session.execute(stmt)).scalars().all())
+        failed = []
+        for order_id in ids:
+            try:
+                await broker.cancel_order(order_id)
+            except Exception:
+                logger.exception("Cancel of resting order %s failed -- continuing to close positions", order_id)
+                failed.append(order_id)
+        return failed
+
+    async def process_resting_fills(self) -> None:
+        """Fills paper limit orders the market has reached, and feeds their
+        realized PnL to the daily-loss kill switch -- which only ever heard
+        about market orders before, so a loss realized by a resting fill was
+        invisible to it."""
+        realized = await self.paper_broker.check_resting_orders()
+        if realized:
+            await self.risk_manager.record_realized_pnl(realized)
+
+    async def flatten_all(self, mode_override: str | None = None, reason: str = "kill_switch") -> None:
+        """Kill-switch action: reduce every open position to zero at market.
+        `reason` is recorded as the closed trades' exit reason."""
         broker = self.live_broker if mode_override == "live" else (
             self.paper_broker if mode_override == "paper" else await self.current_broker()
         )
+        # Never raises: a failed cancel must not stop the flatten below.
+        failed_cancels = await self.cancel_open_orders(broker)
         positions = await broker.get_positions()
+        failed_closes = []
         for pos in positions.values():
             if pos.size == 0:
                 continue
             side = "sell" if pos.size > 0 else "buy"
-            result = await broker.place_order(
-                OrderRequest(
-                    symbol=pos.symbol,
-                    side=side,
-                    size=abs(pos.size),
-                    order_type="market",
-                    reduce_only=True,
-                    strategy=pos.strategy,
+            try:
+                result = await broker.place_order(
+                    OrderRequest(
+                        symbol=pos.symbol,
+                        side=side,
+                        size=abs(pos.size),
+                        order_type="market",
+                        reduce_only=True,
+                        strategy=pos.strategy,
+                    ),
+                    exit_reason=reason,
                 )
-            )
+            except Exception:
+                # One symbol's failure must not leave the others open.
+                logger.exception("Flatten of %s failed -- continuing with the rest", pos.symbol)
+                failed_closes.append(pos.symbol)
+                continue
+            if result.state == "rejected":  # the live broker returns (not raises) an exchange rejection
+                logger.error("Flatten of %s rejected by the exchange: %s", pos.symbol, result.reason)
+                failed_closes.append(pos.symbol)
+                continue
             if result.realized_pnl != 0.0:
                 await self.risk_manager.record_realized_pnl(result.realized_pnl)
+        for order_id in failed_cancels:
+            # Positions are closed; one more try at whatever is still resting.
+            try:
+                await broker.cancel_order(order_id)
+            except Exception:
+                logger.exception("Resting order %s could NOT be cancelled after the flatten", order_id)
+        if failed_closes:
+            raise RuntimeError(f"flatten_all could not close: {', '.join(failed_closes)}")
 
     async def close_position(self, symbol: str, strategy: str) -> OrderResult | None:
         """Closes exactly ONE (symbol, strategy) position at market,
@@ -144,6 +216,7 @@ class OrderManager:
         deliberately close it out. Returns None if there's nothing open to close.
         """
         broker = await self.current_broker()
+        await self.cancel_open_orders(broker, symbol, strategy)
         positions = await broker.get_positions()
         pos = positions.get(f"{symbol}:{strategy}")
         if pos is None or pos.size == 0:
@@ -152,7 +225,8 @@ class OrderManager:
         result = await broker.place_order(
             OrderRequest(
                 symbol=symbol, side=side, size=abs(pos.size), order_type="market", reduce_only=True, strategy=strategy
-            )
+            ),
+            exit_reason="manual",
         )
         if result.realized_pnl != 0.0:
             await self.risk_manager.record_realized_pnl(result.realized_pnl)
