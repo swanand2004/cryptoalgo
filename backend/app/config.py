@@ -346,7 +346,11 @@ class Settings(BaseSettings):
     # -30% vs -22%; @3x -36% vs +18%; @1x +36% vs +44%; 6-coin small book +19%
     # vs +28% (scratchpad small_account_sim.py / account_sim.py). Same finding
     # as the 2026-10-02 "+1%/day take-profit" study, which lost money.
-    daily_profit_target_pct: float = 0.10
+    # 2026-10-09: OFF (owner approved "profit stop off"). Confirmed harmful a
+    # third and fourth time: reality sim (2023+ starts, $13.90: median $13.07 ->
+    # $16.84 with it off) and score40 (worse in 9/16 cells, at f=0.15 ETH
+    # 2025-26 CAGR 107% -> 48% with it on). The -20% daily LOSS halt stays.
+    daily_profit_target_pct: float = 0.0
     # Peak-to-trough drawdown limit, measured against a PERSISTENT equity
     # high-water mark rather than any single day's starting equity -- the one
     # universal fund risk control this system lacked until 2026-08-31.
