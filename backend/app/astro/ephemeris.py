@@ -4,7 +4,7 @@ import datetime as dt
 from pathlib import Path
 
 import numpy as np
-from skyfield.api import load
+from skyfield.api import Loader
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,8 +35,13 @@ JD_UNIX_EPOCH = 2440587.5
 def _load():
     global _ts, _eph, _earth
     if _eph is None:
-        _ts = load.timescale()
-        _eph = load(str(EPHEMERIS_FILE))
+        # A Loader bound to DATA_DIR, given the bare filename. Passing the full
+        # path to the default loader made skyfield append that path to JPL's
+        # URL (".../planets/bsp//home/.../de421.bsp", a 404), so a fresh
+        # install -- CI, Docker, a new server -- could never download it.
+        loader = Loader(str(DATA_DIR), verbose=False)
+        _ts = loader.timescale()
+        _eph = loader(EPHEMERIS_FILE.name)
         _earth = _eph["earth"]
     return _ts, _eph, _earth
 
