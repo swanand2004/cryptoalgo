@@ -85,6 +85,15 @@ rollback() {
   exit 1
 }
 
+# The nightly retrain (cryptoalgo-retrain.service, 03:00 UTC, up to 3 h) runs
+# from this same backend/app. Swapping the code under it can crash it mid-run
+# or train a model on half old, half new code. Nothing has been touched yet, so
+# just stop; re-run the deploy once it finishes.
+if systemctl is-active --quiet cryptoalgo-retrain.service; then
+  log "ABORTED: nightly retrain is running; nothing was changed. Re-run the deploy when it finishes."
+  exit 1
+fi
+
 log "1/5 Backing up running code -> $BACKUP"
 tar czf "$BACKUP" backend/app frontend/dist
 # From here on, any failing command restores the backup instead of leaving
