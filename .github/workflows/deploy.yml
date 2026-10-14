@@ -1,9 +1,20 @@
 # Test -> build -> deploy to the VPS.
 #
-#   pull_request    : tests + frontend build only (nothing touches the server)
-#   push to main    : tests + build, then deploy -- held for manual approval by
-#                     the `production` environment's required reviewer
-#   workflow_dispatch: same as push, for redeploying main by hand
+#   push to claude/** : tests + build, then deploy -- held for ONE manual
+#                       approval (the `production` environment's required
+#                       reviewer). This workflow never writes to main; merge
+#                       the branch's PR afterwards to record what is live.
+#   push to main      : same (for changes made outside Claude)
+#   pull_request      : tests + build only (nothing touches the server)
+#   workflow_dispatch : redeploy the chosen branch by hand
+#
+# Safety gates on the deploy job:
+#   - repository variable DEPLOY_ENABLED must be "true". Set it only AFTER the
+#     `production` environment has you as required reviewer: GitHub silently
+#     creates a missing environment WITHOUT protection, which would deploy
+#     with no approval at all.
+#   - a commit that does not contain the current main is refused, so an old
+#     branch can never overwrite newer live code.
 #
 # Server-side steps and the automatic rollback live in deploy/remote_install.sh.
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
@@ -18,7 +29,7 @@ name: deploy
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "claude/**"]
   workflow_dispatch:
 
 permissions:
@@ -71,7 +82,7 @@ jobs:
 
   deploy:
     needs: [test, build]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Add yourself as a required reviewer on this environment
@@ -84,6 +95,15 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a commit that is behind main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            echo "::error::This commit does not contain the current main. Deploying it would roll back live code. Merge main into the branch first."
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           name: frontend-dist

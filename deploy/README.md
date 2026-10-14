@@ -149,15 +149,20 @@ loop is worse than no trading loop: it holds positions it has stopped managing.
 
 `.github/workflows/deploy.yml` replaces running `deploy_vps.sh` by hand:
 
-- **Every PR**: backend tests + frontend build. Nothing touches the server.
-- **Merge to `main`**: the same checks, then the deploy job **waits for your
-  approval** (the `production` environment), then uploads, installs and
-  restarts via `deploy/remote_install.sh`.
+- **Claude pushes to a `claude/...` branch** (or anyone pushes to `main`): backend
+  tests + frontend build, then the deploy job **waits for your one Approve**
+  (the `production` environment), then uploads, installs and restarts via
+  `deploy/remote_install.sh`. Merge the branch's PR afterwards to record on
+  `main` what is live; the workflow itself never writes to `main`.
+- **Pull requests**: tests + build only. Nothing touches the server.
 - **The deploy only passes if the trading loop is alive on the new code**: a
   fresh paper equity snapshot written after the restart, checked after 150 s so
   the 60 s loop has ticked, not merely `systemctl is-active`. Otherwise it
   restores the previous code (and Python packages, if they changed), restarts,
   and the run goes red. Same if any install step fails.
+- **Refused before anything changes**: a commit that does not contain the
+  current `main` (it would roll back live code), and any deploy while the
+  nightly retrain is running.
 
 One-time setup, from your laptop:
 
@@ -173,7 +178,11 @@ ssh-keyscan -p 20024 <server-ip>
    `VPS_HOST`, `VPS_PORT`, `VPS_USER` (`root`), `VPS_SSH_KEY` (contents of
    `~/.ssh/cryptoalgo_deploy`), `VPS_KNOWN_HOSTS` (output of step 2).
 4. GitHub → Settings → Environments → New environment `production` →
-   *Required reviewers* → add yourself. Without this a merge deploys immediately.
+   *Required reviewers* → add yourself.
+5. **Only after step 4**: Settings → Secrets and variables → Actions →
+   *Variables* → `DEPLOY_ENABLED` = `true`. This is the on-switch; until it is
+   set, pushes run tests and the build but never deploy. Order matters: if the
+   environment has no reviewer, GitHub deploys with no approval at all.
 
 Redeploy `main` by hand: Actions → deploy → *Run workflow*. Revoke access any
 time by deleting the key's line from `/root/.ssh/authorized_keys` on the server.
