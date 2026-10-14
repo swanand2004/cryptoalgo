@@ -120,7 +120,10 @@ def test_matches_values_from_the_original_code(seed, drift, cut, decision, score
     sig = 0.6 if seed % 2 else -0.6
     for frame in (win, win.copy(deep=True)):  # memo miss, then memo hit
         a = F.analyse("BTCUSD", F.Inputs(hourly=frame, strategy_signal=sig))
-        assert _key(a) == (decision, score, conviction, stop, target)
+        # rel=1e-12: the values must match to ~12 significant figures, but the
+        # last bit varies with the numpy/BLAS build and summation order, so an
+        # exact == fails on a different machine (it did on the CI runner).
+        assert _key(a) == pytest.approx((decision, score, conviction, stop, target), rel=1e-12)
 
 
 # ------------------------------------------------------------ 200 historical timestamps per coin

@@ -145,6 +145,39 @@ loop is worse than no trading loop: it holds positions it has stopped managing.
 
 ---
 
+## Automatic deploys from GitHub (the VPS)
+
+`.github/workflows/deploy.yml` replaces running `deploy_vps.sh` by hand:
+
+- **Every PR**: backend tests + frontend build. Nothing touches the server.
+- **Merge to `main`**: the same checks, then the deploy job **waits for your
+  approval** (the `production` environment), then uploads, installs and
+  restarts via `deploy/remote_install.sh`.
+- **The deploy only passes if the trading loop is alive on the new code**: a
+  fresh paper equity snapshot written after the restart, checked after 150 s so
+  the 60 s loop has ticked, not merely `systemctl is-active`. Otherwise it
+  restores the previous code (and Python packages, if they changed), restarts,
+  and the run goes red. Same if any install step fails.
+
+One-time setup, from your laptop:
+
+```bash
+# 1. A deploy-only key (never reuse ~/.ssh/cryptoalgo_vps)
+ssh-keygen -t ed25519 -f ~/.ssh/cryptoalgo_deploy -N "" -C github-deploy
+ssh-copy-id -i ~/.ssh/cryptoalgo_deploy.pub -p 20024 root@<server-ip>
+# 2. The server's host key, so the runner cannot be pointed at an impostor
+ssh-keyscan -p 20024 <server-ip>
+```
+
+3. GitHub → repo → Settings → Secrets and variables → Actions → add
+   `VPS_HOST`, `VPS_PORT`, `VPS_USER` (`root`), `VPS_SSH_KEY` (contents of
+   `~/.ssh/cryptoalgo_deploy`), `VPS_KNOWN_HOSTS` (output of step 2).
+4. GitHub → Settings → Environments → New environment `production` →
+   *Required reviewers* → add yourself. Without this a merge deploys immediately.
+
+Redeploy `main` by hand: Actions → deploy → *Run workflow*. Revoke access any
+time by deleting the key's line from `/root/.ssh/authorized_keys` on the server.
+
 ## Whichever you pick
 
 - **Secrets**: `.env` never goes in git or the image. Use the host's secret store.

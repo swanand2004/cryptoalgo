@@ -1,0 +1,113 @@
+# Test -> build -> deploy to the VPS.
+#
+#   pull_request    : tests + frontend build only (nothing touches the server)
+#   push to main    : tests + build, then deploy -- held for manual approval by
+#                     the `production` environment's required reviewer
+#   workflow_dispatch: same as push, for redeploying main by hand
+#
+# Server-side steps and the automatic rollback live in deploy/remote_install.sh.
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   VPS_HOST         server IP / hostname
+#   VPS_PORT         SSH port
+#   VPS_USER         SSH user (root today, see deploy/README.md)
+#   VPS_SSH_KEY      private half of a DEPLOY-ONLY key (not your personal one)
+#   VPS_KNOWN_HOSTS  output of `ssh-keyscan -p <port> <host>`, pinned so the
+#                    runner refuses to talk to anything impersonating the VPS
+name: deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # matches the server and the Dockerfile
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      # skyfield downloads the ~17 MB JPL ephemeris on first use; keep it
+      # between runs so the astro tests do not depend on NASA being up.
+      - uses: actions/cache@v4
+        with:
+          path: backend/app/astro/data/*.bsp
+          key: ephemeris-de421-v1
+      - run: python -m pytest -q
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: tar czf ../deploy_dist.tgz dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: deploy_dist.tgz
+          retention-days: 7
+
+  deploy:
+    needs: [test, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Add yourself as a required reviewer on this environment
+    # (Settings -> Environments -> production) so a merge alone never
+    # restarts the live book.
+    environment: production
+    # Never two deploys at once, and never cancel one halfway through.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+      - name: Pack backend (same excludes as deploy_vps.sh)
+        working-directory: backend
+        run: >
+          tar czf ../deploy_app.tgz --exclude=__pycache__
+          --exclude=app/gold/model_store --exclude=app/analyst/model_store app
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Upload and install (rolls back automatically if trading stalls)
+        env:
+          HOST: ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}
+          PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          SSH_OPTS="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ServerAliveInterval=30"
+          scp $SSH_OPTS -P "$PORT" deploy_app.tgz deploy_dist.tgz backend/requirements.txt deploy/remote_install.sh "$HOST:/tmp/"
+          ssh $SSH_OPTS -p "$PORT" "$HOST" bash /tmp/remote_install.sh
+      - name: Remove key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
