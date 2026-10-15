@@ -149,12 +149,13 @@ loop is worse than no trading loop: it holds positions it has stopped managing.
 
 `.github/workflows/deploy.yml` replaces running `deploy_vps.sh` by hand:
 
-- **Claude pushes to a `claude/...` branch** (or anyone pushes to `main`): backend
-  tests + frontend build, then the deploy job **waits for your one Approve**
-  (the `production` environment), then uploads, installs and restarts via
-  `deploy/remote_install.sh`. Merge the branch's PR afterwards to record on
+- **Every push and pull request**: backend tests + frontend build. Nothing
+  touches the server.
+- **Deploy = one click**: GitHub → Actions → **deploy** → *Run workflow* → pick
+  the branch (e.g. Claude's `claude/...`) → *Run*. Tests and build run again,
+  then it uploads, installs and restarts via `deploy/remote_install.sh`. Works
+  from the GitHub phone app too. Merge the branch's PR afterwards to record on
   `main` what is live; the workflow itself never writes to `main`.
-- **Pull requests**: tests + build only. Nothing touches the server.
 - **The deploy only passes if the trading loop is alive on the new code**: a
   fresh paper equity snapshot written after the restart, checked after 150 s so
   the 60 s loop has ticked, not merely `systemctl is-active`. Otherwise it
@@ -164,28 +165,28 @@ loop is worse than no trading loop: it holds positions it has stopped managing.
   current `main` (it would roll back live code), and any deploy while the
   nightly retrain is running.
 
-One-time setup, from your laptop:
+Why a click and not an "Approve" on push: environment required reviewers do
+not exist for a private repo on GitHub's free plan, so such a gate would let
+every push deploy with no approval at all.
+
+### One-time setup (one command, on your laptop, in Git Bash)
 
 ```bash
-# 1. A deploy-only key (never reuse ~/.ssh/cryptoalgo_vps)
-ssh-keygen -t ed25519 -f ~/.ssh/cryptoalgo_deploy -N "" -C github-deploy
-ssh-copy-id -i ~/.ssh/cryptoalgo_deploy.pub -p 20024 root@<server-ip>
-# 2. The server's host key, so the runner cannot be pointed at an impostor
-ssh-keyscan -p 20024 <server-ip>
+winget install GitHub.cli     # once, then reopen Git Bash
+gh auth login                 # once
+cd ~/Desktop/cryptoalgo
+bash deploy/setup_github_deploy.sh <server-ip>        # port defaults to 20024, user to root
 ```
 
-3. GitHub → repo → Settings → Secrets and variables → Actions → add
-   `VPS_HOST`, `VPS_PORT`, `VPS_USER` (`root`), `VPS_SSH_KEY` (contents of
-   `~/.ssh/cryptoalgo_deploy`), `VPS_KNOWN_HOSTS` (output of step 2).
-4. GitHub → Settings → Environments → New environment `production` →
-   *Required reviewers* → add yourself.
-5. **Only after step 4**: Settings → Secrets and variables → Actions →
-   *Variables* → `DEPLOY_ENABLED` = `true`. This is the on-switch; until it is
-   set, pushes run tests and the build but never deploy. Order matters: if the
-   environment has no reviewer, GitHub deploys with no approval at all.
+It creates a deploy-only key (`~/.ssh/cryptoalgo_deploy`, never your personal
+one), authorises it on the server with your existing `~/.ssh/cryptoalgo_vps`,
+proves it can log in, pins the host key your laptop already trusts, stores the
+five secrets, and only then sets `DEPLOY_ENABLED=true`. Safe to re-run. If any
+step fails it stops, and nothing is stored in GitHub before the login test
+passes.
 
-Redeploy `main` by hand: Actions → deploy → *Run workflow*. Revoke access any
-time by deleting the key's line from `/root/.ssh/authorized_keys` on the server.
+Turn deploys off: `gh variable delete DEPLOY_ENABLED`. Revoke the key: delete
+the `github-deploy` line from `/root/.ssh/authorized_keys` on the server.
 
 ## Whichever you pick
 

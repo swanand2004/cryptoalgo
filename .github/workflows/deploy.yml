@@ -1,20 +1,18 @@
 # Test -> build -> deploy to the VPS.
 #
-#   push to claude/** : tests + build, then deploy -- held for ONE manual
-#                       approval (the `production` environment's required
-#                       reviewer). This workflow never writes to main; merge
+#   push (main, claude/**), pull_request : tests + build only. Nothing
+#                       touches the server.
+#   workflow_dispatch : tests + build, then DEPLOY the chosen branch. This
+#                       click (Actions -> deploy -> Run workflow) is the
+#                       approval. This workflow never writes to main; merge
 #                       the branch's PR afterwards to record what is live.
-#   push to main      : same (for changes made outside Claude)
-#   pull_request      : tests + build only (nothing touches the server)
-#   workflow_dispatch : redeploy the chosen branch by hand
 #
 # Safety gates on the deploy job:
-#   - repository variable DEPLOY_ENABLED must be "true". Set it only AFTER the
-#     `production` environment has you as required reviewer: GitHub silently
-#     creates a missing environment WITHOUT protection, which would deploy
-#     with no approval at all.
+#   - repository variable DEPLOY_ENABLED must be "true" (the on/off switch;
+#     deploy/setup_github_deploy.sh sets it last).
 #   - a commit that does not contain the current main is refused, so an old
 #     branch can never overwrite newer live code.
+#   - deploy/remote_install.sh refuses while the nightly retrain is running.
 #
 # Server-side steps and the automatic rollback live in deploy/remote_install.sh.
 # Required repository secrets (Settings -> Secrets and variables -> Actions):
@@ -82,12 +80,13 @@ jobs:
 
   deploy:
     needs: [test, build]
-    if: github.event_name != 'pull_request' && vars.DEPLOY_ENABLED == 'true'
+    # Only a person clicking "Run workflow" deploys. A push never does: on a
+    # private repo on GitHub's free plan, environment required reviewers do
+    # not exist, so an environment gate would let every push straight through.
+    if: github.event_name == 'workflow_dispatch' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Add yourself as a required reviewer on this environment
-    # (Settings -> Environments -> production) so a merge alone never
-    # restarts the live book.
+    # Records each deploy under Settings -> Environments. A record, not a gate.
     environment: production
     # Never two deploys at once, and never cancel one halfway through.
     concurrency:
