@@ -1,0 +1,89 @@
+# Read-only health report for the VPS. Changes nothing on the server: no
+# restart, no file writes, no package installs. Uses the same secrets as
+# deploy.yml (VPS_HOST, VPS_PORT, VPS_USER, VPS_SSH_KEY, VPS_KNOWN_HOSTS).
+#
+# Runs on a manual "Run workflow" click, or when this file itself is pushed
+# on a claude/** branch, so a session can check the box without a deploy.
+name: server-status
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+    paths: [".github/workflows/server-status.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-status
+  cancel-in-progress: true
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check secrets are present
+        env:
+          H: ${{ secrets.VPS_HOST }}
+          P: ${{ secrets.VPS_PORT }}
+          U: ${{ secrets.VPS_USER }}
+          K: ${{ secrets.VPS_SSH_KEY }}
+          KH: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          missing=""
+          [ -n "$H" ]  || missing="$missing VPS_HOST"
+          [ -n "$P" ]  || missing="$missing VPS_PORT"
+          [ -n "$U" ]  || missing="$missing VPS_USER"
+          [ -n "$K" ]  || missing="$missing VPS_SSH_KEY"
+          [ -n "$KH" ] || missing="$missing VPS_KNOWN_HOSTS"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing. Run deploy/setup_github_deploy.sh once on the laptop."
+            exit 1
+          fi
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Server status
+        env:
+          HOST: ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}
+          PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -p "$PORT" "$HOST" 'bash -s' <<'REMOTE'
+          sec() { echo; echo "===== $* ====="; }
+          ROOT=/opt/cryptoalgo
+          sec "host"
+          echo "time (UTC): $(date -u '+%F %T')"; uptime
+          sec "systemd units"
+          for u in cryptoalgo cryptoalgo-tunnel cryptoalgo-retrain.timer; do
+            printf '%-26s %s  (since %s)\n' "$u" "$(systemctl is-active $u 2>/dev/null)" \
+              "$(systemctl show -p ActiveEnterTimestamp --value $u 2>/dev/null)"
+          done
+          echo "restarts (NRestarts): $(systemctl show -p NRestarts --value cryptoalgo 2>/dev/null)"
+          sec "API health (loopback)"
+          echo -n "/api/health          : "; curl -s -m 5 -w ' [HTTP %{http_code}]' http://127.0.0.1:8000/api/health; echo
+          echo -n "/api/health/trading  : "; curl -s -m 5 -w ' [HTTP %{http_code}]' http://127.0.0.1:8000/api/health/trading; echo
+          sec "resources"
+          free -m; df -h / $ROOT/data 2>/dev/null | uniq
+          ls -la $ROOT/data/*.db 2>/dev/null
+          sec "deployed code"
+          ls -1t $ROOT/backups/code_*.tgz 2>/dev/null | head -3 | sed 's/^/last backups: /'
+          stat -c 'backend/app mtime: %y' $ROOT/backend/app 2>/dev/null
+          sec "public tunnel URL"
+          journalctl -u cryptoalgo-tunnel --no-pager 2>/dev/null | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' | tail -1
+          sec "app.log: last book / trade lines"
+          grep -aE 'Book:|consolidated:|order|fill|kill|deadman|Deadman' $ROOT/backend/app.log 2>/dev/null | tail -15
+          sec "app.log: last 20 WARNING/ERROR"
+          grep -aE 'WARNING|ERROR|CRITICAL|Traceback' $ROOT/backend/app.log 2>/dev/null | tail -20
+          sec "journal: errors last 24h"
+          journalctl -u cryptoalgo --since '24 hours ago' -p err --no-pager 2>/dev/null | tail -15
+          REMOTE
+      - name: Remove key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
